@@ -1,4 +1,4 @@
--module(quic).
+-module(quack).
 -export([connect/2]).
 
 connect(RemoteEndpoint, RemotePort) ->

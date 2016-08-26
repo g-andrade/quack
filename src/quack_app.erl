@@ -1,4 +1,4 @@
--module(quic_app).
+-module(quack_app).
 
 -behaviour(application).
 
@@ -10,7 +10,7 @@
 %% ===================================================================
 
 start(_StartType, _StartArgs) ->
-    quic_sup:start_link().
+    quack_sup:start_link().
 
 stop(_State) ->
     ok.

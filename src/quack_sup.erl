@@ -1,4 +1,4 @@
--module(quic_sup).
+-module(quack_sup).
 
 -behaviour(supervisor).
 

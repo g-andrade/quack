@@ -1,4 +1,4 @@
-{application, quic,
+{application, quack,
  [
   {description, "Erlang implementation of Google QUIC protocol"},
   {vsn, git},
@@ -11,6 +11,6 @@
                   %curve25519, % broken on app start
                   hkdf
                  ]},
-  {mod, { quic_app, []}},
+  {mod, { quack_app, []}},
   {env, []}
  ]}.
