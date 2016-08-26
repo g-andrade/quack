@@ -29,7 +29,7 @@
           connection_id :: connection_id(),   % optional
           version :: binary(),                % optional
           diversification_nonce :: binary(),  % optional
-          packet_number :: uint48(),          % optional
+          packet_number :: packet_number(),   % optional
           frames :: [frame()]                 % optional
          }).
 -type regular_packet() :: #regular_packet{}.
@@ -37,5 +37,6 @@
 -type quic_packet() :: public_reset_packet() | version_negotiation_packet() | regular_packet().
 
 -type connection_id() :: uint64().
+-type packet_number() :: uint48().
 
 -endif.
