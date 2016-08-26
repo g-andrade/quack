@@ -31,9 +31,9 @@ decode_frames(<<1:1,
                 Data/binary>>,
               PacketNumberEncoding) ->
     % Stream frame (special)
-    {RemainingData, Frame} = decode_stream_frame(Data, FinBit, DataLengthBit,
-                                                 OffsetHeaderEncoding,
-                                                 StreamIdEncoding),
+    {RemainingData, Frame} = quic_frame_stream:decode(Data, FinBit, DataLengthBit,
+                                                      OffsetHeaderEncoding,
+                                                      StreamIdEncoding),
     [Frame | decode_frames(RemainingData, PacketNumberEncoding)];
 decode_frames(<<0:1,
                 1:1,
@@ -44,9 +44,9 @@ decode_frames(<<0:1,
                 Data/binary>>,
               PacketNumberEncoding) ->
     % ACK frame (special)
-    {RemainingData, Frame} = decode_ack_frame(Data, MultipleAckRangesBit,
-                                              LargestAckedEncoding,
-                                              AckBlockEncoding),
+    {RemainingData, Frame} = quic_frame_ack:decode(Data, MultipleAckRangesBit,
+                                                   LargestAckedEncoding,
+                                                   AckBlockEncoding),
     [Frame | decode_frames(RemainingData, PacketNumberEncoding)];
 %decode_frames(<<0:2,
 %                1:1,
@@ -97,7 +97,7 @@ encode_frames(Frames, PacketNumberEncoding) ->
 encode_frame(Frame, _PacketNumberEncoding) when is_record(Frame, stream_frame);
                                                is_record(Frame, stream_fin_frame) ->
     {Data, FinBit, DataLengthBit, OffsetHeaderEncoding, StreamIdEncoding} =
-        encode_stream_frame(Frame),
+        quic_frame_stream:encode(Frame),
     [<<1:1,
        FinBit:1,
        DataLengthBit:1,
@@ -106,7 +106,7 @@ encode_frame(Frame, _PacketNumberEncoding) when is_record(Frame, stream_frame);
      Data];
 encode_frame(#ack_frame{} = Frame, _PacketNumberEncoding) ->
     {Data, MultipleAckRangesBit, LargestAckedEncoding, AckBlockEncoding} =
-        encode_ack_frame(Frame),
+        quic_frame_ack:encode(Frame),
     [<<0:1,
        1:1,
        MultipleAckRangesBit:1,
@@ -130,131 +130,6 @@ encode_frame(#stop_waiting_frame{} = Frame, PacketNumberEncoding) ->
     [2#00000110, encode_stop_waiting_frame(Frame, PacketNumberEncoding)];
 encode_frame(#ping_frame{} = Frame, _PacketNumberEncoding) ->
     [2#00000111, encode_ping_frame(Frame)].
-
-%% ------------------------------------------------------------------
-%% Stream frame handling
-%% ------------------------------------------------------------------
-
-decode_stream_frame(Data, FinBit, DataLengthBit, OffsetHeaderEncoding, StreamIdEncoding) ->
-    {ChunkA, StreamId} = quic_proto_varint:decode_u32(Data, StreamIdEncoding),
-    {ChunkB, Offset} = quic_proto_varint:decode_u64(ChunkA, OffsetHeaderEncoding),
-    {ChunkC, DataPayloadLength} = decode_stream_frame_data_length(ChunkB, FinBit, DataLengthBit),
-    <<DataPayload:DataPayloadLength/binary, RemainingData/binary>> = ChunkC,
-    {RemainingData,
-     case FinBit of
-         1 -> #stream_fin_frame{ stream_id = StreamId };
-         0 -> #stream_frame{ stream_id = StreamId,
-                             offset = Offset,
-                             data_payload = DataPayload }
-     end}.
-
-decode_stream_frame_data_length(<<DataLength:2/little-unsigned-integer-unit:8,
-                                  RemainingData/binary>>,
-                                FinBit, DataLengthBit)
-  when (FinBit =:= 0 andalso DataLengthBit =:= 1 andalso DataLength > 1);
-       (FinBit =:= 1 andalso DataLengthBit =:= 1 andalso DataLength =:= 0) ->
-    {RemainingData, DataLength};
-decode_stream_frame_data_length(<<RemainingData/binary>>,
-                                FinBit, DataLengthBit)
-  when FinBit =:= 0, DataLengthBit =:= 0 ->
-    % stream frame extends to the end of the packet
-    {RemainingData, byte_size(RemainingData)}.
-
-encode_stream_frame(#stream_fin_frame{ stream_id = StreamId }) ->
-    FinBit = 1,
-    DataLengthBit = 0,
-    {EncodedStreamId, StreamIdEncoding} = quic_proto_varint:encode_u32(StreamId),
-    {EncodedOffset, OffsetHeaderEncoding} = quic_proto_varint:encode_u64(0),
-    {[EncodedStreamId, EncodedOffset],
-     FinBit, DataLengthBit, OffsetHeaderEncoding, StreamIdEncoding};
-encode_stream_frame(#stream_frame{ stream_id = StreamId,
-                                   offset = Offset,
-                                   data_payload = DataPayload }) ->
-    DataPayloadLength = iolist_size(DataPayload),
-    FinBit = 0,
-    DataLengthBit = 1,
-    {EncodedStreamId, StreamIdEncoding} = quic_proto_varint:encode_u32(StreamId),
-    {EncodedOffset, OffsetHeaderEncoding} = quic_proto_varint:encode_u64(Offset),
-    EncodedDataPayloadLength = <<DataPayloadLength:2/little-unsigned-integer-unit:8>>,
-    {[EncodedStreamId, EncodedOffset, EncodedDataPayloadLength, DataPayload],
-     FinBit, DataLengthBit, OffsetHeaderEncoding, StreamIdEncoding}.
-
-%% ------------------------------------------------------------------
-%% Ack frame handling
-%% ------------------------------------------------------------------
-
-decode_ack_frame(Data, MultipleAckRangesBit, LargestAckedEncoding, AckBlockEncoding) ->
-    {ChunkA, _LargestAcked} = quic_proto_varint:decode_u48(Data, LargestAckedEncoding),
-    <<_LargestAckedDeltaTime:2/binary, ChunkB/binary>> = ChunkA,
-    {ChunkC, _AckBlocks} = decode_ack_frame_blocks(ChunkB, MultipleAckRangesBit, AckBlockEncoding),
-    {RemainingData, PacketTimestamps} = decode_ack_frame_packet_timestamps(ChunkC),
-    %lager:debug("~p bytes left", [byte_size(RemainingData)]),
-    {RemainingData,
-     #ack_frame{ largest_acked = unhandled,
-                 largest_acked_delta_time = unhandled,
-                 packet_timestamps = PacketTimestamps }}.
-
-decode_ack_frame_blocks(Data, 0 = _MultipleAckRangesBit, AckBlockEncoding) ->
-    %lager:debug("decoding single ack block"),
-    decode_ack_frame_n_blocks(Data, AckBlockEncoding, 1, 1, []);
-decode_ack_frame_blocks(Data, 1 = _MultipleAckRangesBit, AckBlockEncoding) ->
-    <<NumBlocksMinus1:8, RemainingData/binary>> = Data,
-    NumBlocks = NumBlocksMinus1 + 1,
-    %lager:debug("decoding ~p ack blocks", [NumBlocks]),
-    decode_ack_frame_n_blocks(RemainingData, AckBlockEncoding, NumBlocks, NumBlocks, []).
-
-decode_ack_frame_n_blocks(Data, _AckBlockEncoding, RemainingNumBlocks, _TotalNumBlocks, BlocksAcc)
-  when RemainingNumBlocks < 1->
-    % no more blocks
-    %lager:debug("finished decoding ~p ack blocks", [TotalNumBlocks]),
-    {Data, lists:reverse(BlocksAcc)};
-decode_ack_frame_n_blocks(Data, AckBlockEncoding, RemainingNumBlocks, TotalNumBlocks, BlocksAcc)
-  when RemainingNumBlocks =:= TotalNumBlocks ->
-    % first
-    {RemainingData, _AckBlockDelta} = quic_proto_varint:decode_u48(Data, AckBlockEncoding),
-    %lager:debug("decoded ~p/~p ack block: ~p", [TotalNumBlocks - RemainingNumBlocks + 1,
-    %                                            TotalNumBlocks,
-    %                                            AckBlockDelta]),
-    decode_ack_frame_n_blocks(RemainingData, AckBlockEncoding, RemainingNumBlocks - 1,
-                              TotalNumBlocks, BlocksAcc);
-decode_ack_frame_n_blocks(Data, AckBlockEncoding, RemainingNumBlocks, TotalNumBlocks, BlocksAcc) ->
-    {ChunkA, _AckBlockDelta} = quic_proto_varint:decode_u48(Data, AckBlockEncoding),
-    <<_AckBlockGap:8, ChunkB/binary>> = ChunkA,
-    %lager:debug("decoded ~p/~p ack block: ~p (gap ~p)", [TotalNumBlocks - RemainingNumBlocks + 1,
-    %                                                     TotalNumBlocks,
-    %                                                     AckBlockDelta,
-    %                                                    AckBlockGap]),
-    decode_ack_frame_n_blocks(ChunkB, AckBlockEncoding, RemainingNumBlocks - 1,
-                              TotalNumBlocks, BlocksAcc).
-
-decode_ack_frame_packet_timestamps(Data) ->
-    <<NumEntries:8,
-      ChunkA/binary>> = Data,
-    %lager:debug("decoding ~p ack timestamps", [NumEntries]),
-    {RemainingData, _Unhandled} = decode_ack_frame_packet_timestamp_entries(ChunkA, NumEntries, NumEntries, []),
-    {RemainingData, unhandled}.
-
-decode_ack_frame_packet_timestamp_entries(Data, RemainingNumEntries, _TotalNumEntries, Acc)
-  when RemainingNumEntries < 1 ->
-    % no more entries
-    {Data, lists:reverse(Acc)};
-decode_ack_frame_packet_timestamp_entries(Data, RemainingNumEntries, TotalNumEntries, Acc)
-  when RemainingNumEntries =:= TotalNumEntries ->
-    % first
-    <<_DeltaLargestAcked:8,
-      _TimeSincePreviousTimestamp:4/little-unsigned-integer-unit:8,
-      ChunkA/binary>> = Data,
-    %lager:debug("decoded first ack timestamp: ~p/~p", [DeltaLargestAcked, TimeSincePreviousTimestamp]),
-    decode_ack_frame_packet_timestamp_entries(ChunkA, RemainingNumEntries - 1, TotalNumEntries, Acc);
-decode_ack_frame_packet_timestamp_entries(Data, RemainingNumEntries, TotalNumEntries, Acc) ->
-    <<_DeltaLargestAcked:8,
-      _TimeSincePreviousTimestamp:2/binary, % @TODO: 16 bit custom floating point
-      ChunkA/binary>> = Data,
-    %lager:debug("decoded ack timestamp: ~p/~p", [DeltaLargestAcked, TimeSincePreviousTimestamp]),
-    decode_ack_frame_packet_timestamp_entries(ChunkA, RemainingNumEntries - 1, TotalNumEntries, Acc).
-
-encode_ack_frame(#ack_frame{}) ->
-    exit(not_supported).
 
 %% ------------------------------------------------------------------
 %% Padding frame handling
