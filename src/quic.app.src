@@ -1,0 +1,16 @@
+{application, quic,
+ [
+  {description, "Erlang implementation of Google QUIC protocol"},
+  {vsn, git},
+  {registered, []},
+  {applications, [
+                  kernel,
+                  stdlib,
+                  lager,
+                  hash,
+                  %curve25519, % broken on app start
+                  hkdf
+                 ]},
+  {mod, { quic_app, []}},
+  {env, []}
+ ]}.
