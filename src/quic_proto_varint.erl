@@ -10,6 +10,7 @@
 -export([decode_u48/2]).
 -export([encode_u48/1]).
 -export([encode_u48/2]).
+-export([u48s_encoding/1]).
 
 -export([decode_u64/2]).
 -export([encode_u64/1]).
@@ -66,6 +67,11 @@ encode_u48(Value, 2#10) when Value =< 16#0000FFFFFFFF ->
     <<Value:4/little-unsigned-integer-unit:8>>;
 encode_u48(Value, 2#11) when Value =< 16#FFFFFFFFFFFF ->
     <<Value:6/little-unsigned-integer-unit:8>>.
+
+u48s_encoding([_|_] = Values) ->
+    MaxValue = lists:max(Values),
+    {_, Encoding} = encode_u48(MaxValue),
+    Encoding.
 
 %% ------------------------------------------------------------------
 %% u64 Function Definitions

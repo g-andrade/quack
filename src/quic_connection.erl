@@ -47,6 +47,7 @@
           connection_id :: uint64(),
           outbound_packet_number :: uint64(),
           crypto_state :: quic_crypto:state(),
+          flow_state :: quic_flow:state(),
 
           inbound_streams = #{} :: #{stream_id() => inbound_stream_state()},
           outbound_streams = #{} :: #{stream_id() => outbound_stream_state()}
@@ -206,24 +207,36 @@ setup_connection(#state{ connection_id = undefined,
                          crypto_state = undefined,
                          outbound_packet_number = undefined } = State) ->
     ConnectionId = crypto:rand_uniform(0, 1 bsl 64),
-    Reactions = quic_crypto:on_start(ConnectionId),
+    FlowState = quic_flow:initial_state(),
+    CryptoReactions = quic_crypto:on_start(ConnectionId),
     NewState = State#state{ connection_id = ConnectionId,
-                            outbound_packet_number = 0 },
-    handle_stream_reactions(?CRYPTO_NEGOTIATION_STREAM_ID, Reactions, NewState,
+                            outbound_packet_number = 0,
+                            flow_state = FlowState },
+    handle_stream_reactions(?CRYPTO_NEGOTIATION_STREAM_ID, CryptoReactions, NewState,
                             #state.crypto_state).
 
 -spec handle_received_data(binary(), state()) -> state().
 handle_received_data(Data, State) ->
     {Packet, NewCryptoState} = quic_packet:decode(Data, server, State#state.crypto_state),
+    FlowReactions = quic_flow:on_receive_packet(Packet, State#state.flow_state),
     %lager:debug("got packet: ~p", [QuicPacket]),
-    handle_received_packet(Packet, State#state{ crypto_state = NewCryptoState }).
+    StateB = State#state{ crypto_state = NewCryptoState },
+    handle_flow_reactions(FlowReactions, StateB).
 
 -spec handle_received_packet(quic_packet(), state()) -> state().
-handle_received_packet(#regular_packet{ frames = Frames }, State) ->
-    lists:foldl(fun handle_received_frame/2, State, Frames).
+handle_received_packet(#regular_packet{ packet_number = PacketNumber,
+                                        frames = Frames }, State) ->
+    lists:foldl(
+      fun (Frame, StateAcc) ->
+              handle_received_frame(PacketNumber, Frame, StateAcc)
+      end,
+      State,
+      Frames).
 
--spec handle_received_frame(frame(), state()) -> state().
-handle_received_frame(#stream_frame{} = Frame, #state{ inbound_streams = InboundStreams } = State) ->
+-spec handle_received_frame(packet_number(), frame(), state()) -> state().
+handle_received_frame(_PacketNumber,
+                      #stream_frame{} = Frame,
+                      #state{ inbound_streams = InboundStreams } = State) ->
     #stream_frame{ stream_id = StreamId,
                    offset = Offset,
                    data_payload = DataPayload } = Frame,
@@ -261,15 +274,16 @@ handle_received_frame(#stream_frame{} = Frame, #state{ inbound_streams = Inbound
             NewInboundStreams = maps:put(StreamId, StreamState3, InboundStreams),
             State#state{ inbound_streams = NewInboundStreams }
     end;
-handle_received_frame(#ack_frame{} = AckFrame, State) ->
+handle_received_frame(_PacketNumber, #ack_frame{} = AckFrame, State) ->
     % @TODO
     lager:debug("got ack frame: ~p", [lager:pr(AckFrame, ?MODULE)]),
     State;
-handle_received_frame(#stop_waiting_frame{} = StopWaitingFrame, State) ->
-    % @TODO
+handle_received_frame(PacketNumber, #stop_waiting_frame{} = StopWaitingFrame, State) ->
     lager:debug("got stop_waiting_frame: ~p", [StopWaitingFrame]),
-    State;
-handle_received_frame(#padding_frame{}, State) ->
+    FlowState = State#state.flow_state,
+    FlowReactions = quic_flow:on_receive_stop_waiting(PacketNumber, StopWaitingFrame, FlowState),
+    handle_flow_reactions(FlowReactions, State);
+handle_received_frame(_PacketNumber, #padding_frame{}, State) ->
     % ignore
     State.
 
@@ -279,8 +293,8 @@ handle_received_frame(#padding_frame{}, State) ->
 handle_inbound_stream(StreamId, DataKv, State)
   when StreamId =:= ?CRYPTO_NEGOTIATION_STREAM_ID ->
     CryptoState = State#state.crypto_state,
-    Reaction = quic_crypto:on_data_kv(DataKv, CryptoState),
-    handle_stream_reactions(StreamId, Reaction, State, #state.crypto_state).
+    CryptoReactions = quic_crypto:on_data_kv(DataKv, CryptoState),
+    handle_stream_reactions(StreamId, CryptoReactions, State, #state.crypto_state).
 
 %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
 handle_stream_reactions(StreamId, Reactions, State, SubStateKey) ->
@@ -291,13 +305,24 @@ handle_stream_reactions(StreamId, Reactions, State, SubStateKey) ->
       State,
       Reactions).
 
-handle_stream_reaction(StreamId, {reply, {data_payload, DataPayload}}, State, _SubStateKey) ->
+handle_stream_reaction(StreamId, {send, {data_payload, DataPayload}}, State, _SubStateKey) ->
     send_stream_data_payload(StreamId, DataPayload, State);
-handle_stream_reaction(StreamId, {reply, {data_payload, DataPayload}, OptionalHeaders}, State, _SubStateKey) ->
+handle_stream_reaction(StreamId, {send, {data_payload, DataPayload}, OptionalHeaders}, State, _SubStateKey) ->
     send_stream_data_payload(StreamId, DataPayload, State, OptionalHeaders);
-handle_stream_reaction(StreamId, {reply, {data_kv, DataKv}}, State, _SubStateKey) ->
+handle_stream_reaction(StreamId, {send, {data_kv, DataKv}}, State, _SubStateKey) ->
     send_stream_data_kv(StreamId, DataKv, State);
-handle_stream_reaction(StreamId, {reply, {data_kv, DataPayload}, OptionalHeaders}, State, _SubStateKey) ->
+handle_stream_reaction(StreamId, {send, {data_kv, DataPayload}, OptionalHeaders}, State, _SubStateKey) ->
     send_stream_data_kv(StreamId, DataPayload, State, OptionalHeaders);
 handle_stream_reaction(_StreamId, {change_state, NewSubState}, State, SubStateKey) ->
     setelement(SubStateKey, State, NewSubState).
+
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+handle_flow_reactions(Reactions, State) ->
+    lists:foldl(fun handle_flow_reaction/2, State, Reactions).
+
+handle_flow_reaction({handle_received_packet, Packet}, State) ->
+    handle_received_packet(Packet, State);
+handle_flow_reaction({change_state, NewFlowState}, State) ->
+    State#state{ flow_state = NewFlowState };
+handle_flow_reaction({send, {frame, Frame}}, State) ->
+    send_frame(Frame, State).

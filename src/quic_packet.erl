@@ -7,6 +7,7 @@
 %% API Function Exports
 %% ------------------------------------------------------------------
 
+-export([packet_number/1]).
 -export([decode/3]).
 -export([encode/3]).
 -export([encode_connection_id/1]).
@@ -19,7 +20,19 @@
 -define(MAX_IPV6_PACKET_SIZE, 1370).
 
 %% ------------------------------------------------------------------
-%% API Function Definitions
+%% Getters
+%% ------------------------------------------------------------------
+
+-spec packet_number(quic_packet()) -> packet_number() | undefined.
+packet_number(#public_reset_packet{}) ->
+    undefined;
+packet_number(#version_negotiation_packet{}) ->
+    undefined;
+packet_number(#regular_packet{ packet_number = PacketNumber }) ->
+    PacketNumber.
+
+%% ------------------------------------------------------------------
+%% General encoding / decoding
 %% ------------------------------------------------------------------
 
 decode(<<PublicHeader:1/binary, RemainingData/binary>>, Origin, CryptoState) ->

@@ -134,7 +134,7 @@
 on_start(ConnectionId) ->
     InchoateDataKv = inchoate_data_kv(),
     [{change_state, #plain_encryption{ connection_id = ConnectionId }},
-     {reply, {data_kv, InchoateDataKv}, [{version_header, ?QUIC_VERSION}]}].
+     {send, {data_kv, InchoateDataKv}, [{version_header, ?QUIC_VERSION}]}].
 
 on_diversification_nonce(DiversificationNonce, State) ->
     maybe_diversify(DiversificationNonce, State).
@@ -453,7 +453,7 @@ on_server_rej(ServerRej, PlainEncryption) ->
            encoded_server_cfg = ServerRej#server_rej.encoded_server_cfg,
            encoded_leaf_certificate = EncodedLeafCertificate },
 
-    [{reply, {data_payload, EncodedChloDataKv}},
+    [{send, {data_payload, EncodedChloDataKv}},
      {change_state, initial_encryption(ConnectionId, PickedAeadAlgorithm, InitialEncryptionParams)}].
 
 -spec decode_server_rej(data_kv()) -> server_rej().
