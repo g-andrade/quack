@@ -14,14 +14,15 @@
 %% ------------------------------------------------------------------
 
 decode(Data, MultipleAckRangesBit, LargestAckedEncoding, AckBlockEncoding) ->
-    {ChunkA, _LargestAcked} = quic_proto_varint:decode_u48(Data, LargestAckedEncoding),
-    <<_LargestAckedDeltaTime:2/binary, ChunkB/binary>> = ChunkA,
+    {ChunkA, LargestAcked} = quic_proto_varint:decode_u48(Data, LargestAckedEncoding),
+    <<EncodedLargestAckedDeltaTime:2/binary, ChunkB/binary>> = ChunkA,
+    LargestAckedDeltaTime = quic_proto_f16:decode(EncodedLargestAckedDeltaTime),
     {ChunkC, _AckBlocks} = decode_blocks(ChunkB, MultipleAckRangesBit, AckBlockEncoding),
     {RemainingData, PacketTimestamps} = decode_packet_timestamps(ChunkC),
     %lager:debug("~p bytes left", [byte_size(RemainingData)]),
     {RemainingData,
-     #ack_frame{ largest_acked = unhandled,
-                 largest_acked_delta_time = unhandled,
+     #ack_frame{ largest_acked = LargestAcked,
+                 largest_acked_delta_time = LargestAckedDeltaTime,
                  packet_timestamps = PacketTimestamps }}.
 
 encode(#ack_frame{}) ->

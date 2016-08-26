@@ -40,7 +40,7 @@
 
 -record(ack_frame, {
           largest_acked :: packet_number(),
-          largest_acked_delta_time :: binary(), % @TODO: support custom 16-bit floating point format
+          largest_acked_delta_time :: quic_proto_f16:value(),
           packet_timestamps :: [ack_frame_packet_timestamp()]
          }).
 -type ack_frame() :: #ack_frame{}.
