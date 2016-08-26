@@ -263,7 +263,7 @@ handle_received_frame(#stream_frame{} = Frame, #state{ inbound_streams = Inbound
     end;
 handle_received_frame(#ack_frame{} = AckFrame, State) ->
     % @TODO
-    lager:debug("got ack frame: ~p", [AckFrame]),
+    lager:debug("got ack frame: ~p", [lager:pr(AckFrame, ?MODULE)]),
     State;
 handle_received_frame(#stop_waiting_frame{} = StopWaitingFrame, State) ->
     % @TODO
