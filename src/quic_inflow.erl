@@ -1,4 +1,4 @@
--module(quic_flow).
+-module(quic_inflow).
 
 -include("quic_frame.hrl").
 -include("quic_packet.hrl").
@@ -38,12 +38,13 @@
 %% API Function Exports
 %% ------------------------------------------------------------------
 
+-spec initial_state() -> state().
 initial_state() ->
     #state{
        inbound_packet_blocks = []
       }.
 
-
+-spec on_receive_packet(regular_packet(), state()) -> [quic_connection:inflow_reaction()].
 on_receive_packet(#regular_packet{ packet_number = PacketNumber } = Packet,
                   #state{ inbound_packet_blocks = InboundPacketBlocks } = State) ->
     case put_in_inbound_blocks(PacketNumber, InboundPacketBlocks) of
@@ -56,7 +57,7 @@ on_receive_packet(#regular_packet{ packet_number = PacketNumber } = Packet,
             NewState = State#state{ inbound_packet_blocks = NewInboundPacketBlocks },
             AckFrame = generate_ack_frame(NewState#state.inbound_packet_blocks),
             [{change_state, NewState},
-             {send, {frame, AckFrame}},
+             {send, AckFrame},
              {handle_received_packet, Packet}]
     end.
 
