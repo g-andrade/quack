@@ -15,6 +15,7 @@
 -export([zlib_uncompress/2]).
 -export([coalesce/2]).
 -export([binary_to_hex/1]).
+-export([filtermapfoldl/3]).
 
 %% ------------------------------------------------------------------
 %% API Function Definitions
@@ -70,3 +71,22 @@ coalesce(Value, _Default) -> Value.
 
 binary_to_hex(Value) ->
     integer_to_list(binary:decode_unsigned(iolist_to_binary(Value), big), 16).
+
+filtermapfoldl(FilterMapFoldFun, Acc0, List) ->
+    {RevFilterMapped, AccN} =
+        lists:foldl(
+          fun (Value, {RevFilterMappedAcc, Acc}) ->
+                  {FilterMapResult, NewAcc} = FilterMapFoldFun(Value, Acc),
+                  NewRevFilterMappedAcc =
+                    case FilterMapResult of
+                        false -> RevFilterMappedAcc;
+                        true -> [Value | RevFilterMappedAcc];
+                        {true, MappedValue} -> [MappedValue | RevFilterMappedAcc]
+                    end,
+                  {NewRevFilterMappedAcc, NewAcc}
+          end,
+          {[], Acc0},
+          List),
+
+    FilterMapped = lists:reverse(RevFilterMapped),
+    {FilterMapped, AccN}.

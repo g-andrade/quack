@@ -122,7 +122,7 @@ decode(ChunkA, _Origin, #public_flags{ reset = 1, connection_id = 1 },
     % public reset packet
     {ChunkB, ConnectionId} = decode_connection_id(ChunkA),
     <<"PRST", EncodedTaggedValues/binary>> = ChunkB,
-    TaggedValues = quic_data_kv:decode_tagged_values(EncodedTaggedValues),
+    {TaggedValues, <<>>} = quic_data_kv:decode_tagged_values(EncodedTaggedValues),
     {#public_reset_packet{ connection_id = ConnectionId,
                            tagged_values = TaggedValues },
      CryptoState};

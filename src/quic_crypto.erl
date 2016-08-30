@@ -1,4 +1,5 @@
 -module(quic_crypto).
+-behaviour(quic_stream).
 
 -include("quic.hrl").
 %-include("quic_crypto.hrl").
@@ -8,12 +9,18 @@
 -include("quic_packet.hrl").
 
 %% ------------------------------------------------------------------
+%% quic_stream Function Exports
+%% ------------------------------------------------------------------
+
+-export([on_start_cb/1]).
+-export([on_inbound_cb/2]).
+
+%% ------------------------------------------------------------------
 %% API Function Exports
 %% ------------------------------------------------------------------
 
--export([on_start/1]).
+-export([on_start/2]).
 -export([on_diversification_nonce/2]).
--export([on_data_kv/2]).
 -export([decrypt_packet_payload/4]).
 -export([encrypt_packet_payload/4]).
 -export([packet_encryption_overhead/1]).
@@ -128,26 +135,35 @@
                                     common_certificate_chain_entry()).
 
 %% ------------------------------------------------------------------
-%% API Function Definitions
+%% quic_stream Function Definitions
 %% ------------------------------------------------------------------
 
-on_start(ConnectionId) ->
+on_start_cb([ConnectionId]) ->
     InchoateDataKv = inchoate_data_kv(),
-    [{change_state, #plain_encryption{ connection_id = ConnectionId }},
-     {send, {data_kv, InchoateDataKv}, [{version_header, ?QUIC_VERSION}]}].
+    StreamDataPacking = data_kv,
+    StreamCallbackState = #plain_encryption{ connection_id = ConnectionId },
+    StreamReactions = [{send, InchoateDataKv, [{version_header, ?QUIC_VERSION}]}],
+    {StreamDataPacking, StreamCallbackState, StreamReactions}.
 
-on_diversification_nonce(DiversificationNonce, State) ->
-    maybe_diversify(DiversificationNonce, State).
-
-on_data_kv(DataKv, #plain_encryption{} = State)
+on_inbound_cb([DataKv], #plain_encryption{} = State)
   when DataKv#data_kv.tag =:= <<"REJ">> ->
     lager:debug("processing server rej"),
     ServerRej = decode_server_rej(DataKv),
     on_server_rej(ServerRej, State);
-on_data_kv(DataKv, #initial_encryption{} = State)
+on_inbound_cb([DataKv], #initial_encryption{} = State)
   when DataKv#data_kv.tag =:= <<"SHLO">> ->
     lager:debug("processing server hello"),
     on_server_hello(DataKv, State).
+
+%% ------------------------------------------------------------------
+%% API Function Definitions
+%% ------------------------------------------------------------------
+
+on_start(StreamId, ConnectionId) ->
+    quic_stream:on_start(StreamId, ?MODULE, [ConnectionId]).
+
+on_diversification_nonce(DiversificationNonce, State) ->
+    maybe_diversify(DiversificationNonce, State).
 
 decrypt_packet_payload(_PacketNumber, HeadersData, EncryptedPayload, State)
   when is_record(State, plain_encryption) ->
@@ -411,10 +427,12 @@ on_server_hello(#data_kv{ tag = <<"SHLO">>,
                  client_iv = ClientIv,
                  server_iv = ServerIv },
 
-    [{change_state, #forward_secure_encryption{
-                       connection_id = ConnectionId,
-                       keys = NewKeys,
-                       aead_algorithm = AeadAlgorithm }}].
+    Reactions =
+        [{change_state, #forward_secure_encryption{
+                           connection_id = ConnectionId,
+                           keys = NewKeys,
+                           aead_algorithm = AeadAlgorithm }}],
+    {Reactions, State}.
 
 %% ------------------------------------------------------------------
 %% server REJ
@@ -453,8 +471,10 @@ on_server_rej(ServerRej, PlainEncryption) ->
            encoded_server_cfg = ServerRej#server_rej.encoded_server_cfg,
            encoded_leaf_certificate = EncodedLeafCertificate },
 
-    [{send, {data_payload, EncodedChloDataKv}},
-     {change_state, initial_encryption(ConnectionId, PickedAeadAlgorithm, InitialEncryptionParams)}].
+    Reactions =
+        [{send, {pre_encoded, EncodedChloDataKv}},
+         {change_state, initial_encryption(ConnectionId, PickedAeadAlgorithm, InitialEncryptionParams)}],
+    {Reactions, PlainEncryption}.
 
 -spec decode_server_rej(data_kv()) -> server_rej().
 decode_server_rej(#data_kv{ tag = <<"REJ">>,
@@ -465,7 +485,7 @@ decode_server_rej(#data_kv{ tag = <<"REJ">>,
             error ->
                 {undefined, undefined};
             {ok, EncodedServerCfg} ->
-                {decode_server_cfg(quic_data_kv:decode(EncodedServerCfg)),
+                {decode_server_cfg(quic_data_kv:fully_decode(EncodedServerCfg)),
                  EncodedServerCfg}
         end,
 

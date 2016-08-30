@@ -46,30 +46,25 @@
 
           connection_id :: uint64(),
           outbound_packet_number :: uint64(),
-          crypto_state :: quic_crypto:state(),
+          %crypto_state :: quic_crypto:state(),
           flow_state :: quic_flow:state(),
-
-          inbound_streams = #{} :: #{stream_id() => inbound_stream_state()},
-          outbound_streams = #{} :: #{stream_id() => outbound_stream_state()}
+          crypto_stream :: quic_stream:state(),
+          regular_streams :: #{stream_id() => quic_stream:state()}
          }).
 -type state() :: #state{}.
-
--record(inbound_stream_state, {
-          pending_data :: iolist(),
-          expected_offset :: non_neg_integer()
-         }).
--type inbound_stream_state() :: #inbound_stream_state{}.
-
--record(outbound_stream_state, {
-          offset :: non_neg_integer()
-         }).
--type outbound_stream_state() :: #outbound_stream_state{}.
 
 %% ------------------------------------------------------------------
 %% Type Definitions
 %% ------------------------------------------------------------------
 
-%-type conn_state() :: unverified_server | waiting_server_rej() | waiting_server_hello() | ready.
+-type stream_reaction() :: ({change_state, NewState :: term()} |
+                            {send, Data :: iodata()} |
+                            {send, Data :: iodata(), OptionalHeaders :: [optional_header()]}).
+-export_type([stream_reaction/0]).
+
+-type optional_header() :: ({version, iodata()} |               % 4 bytes
+                            {diversification_nonce, iodata()}). % 32 bytes
+-export_type([optional_header/0]).
 
 %% ------------------------------------------------------------------
 %% API Function Definitions
@@ -136,10 +131,11 @@ send_packet(QuicPacket, State) ->
     #state{ remote_hostname = RemoteHostname,
             remote_port = RemotePort,
             socket = Socket } = State,
-    {Data, NewCryptoState} = quic_packet:encode(QuicPacket, client, State#state.crypto_state),
+
+    {Data, NewCryptoState} = quic_packet:encode(QuicPacket, client, crypto_state(State)),
     %lager:debug("sending packet (encoded size ~p): ~p", [iolist_size(Data), QuicPacket]),
     ok = gen_udp:send(Socket, RemoteHostname, RemotePort, Data),
-    State#state{ crypto_state = NewCryptoState }.
+    set_crypto_state(State, NewCryptoState).
 
 %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
 -spec send_frame(stream_frame(), state()) -> state().
@@ -162,66 +158,46 @@ send_frame(Frame, State, OptionalHeaders) ->
     send_packet(Packet, NewState).
 
 %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
--spec send_stream_data_payload(stream_id(), iodata(), state())
+-spec send_stream_data(stream_id(), iodata(), state())
         -> state().
-send_stream_data_payload(StreamId, DataPayload, State) ->
-    send_stream_data_payload(StreamId, DataPayload, State, []).
+send_stream_data(StreamId, Data, State) ->
+    send_stream_data(StreamId, Data, State, []).
 
--spec send_stream_data_payload(stream_id(), iodata(), state(),
-                               OptionalHeaders :: [{version_header | diversification_nonce_header, iodata()}])
+-spec send_stream_data(stream_id(), iodata(), state(), [optional_header()])
         -> state().
-send_stream_data_payload(StreamId, DataPayload,
-                         #state{ outbound_streams = OutboundStreams } = State,
-                         OptionalHeaders) ->
-
-    PrevStreamState = maps:get(StreamId, OutboundStreams, #outbound_stream_state{ offset = 0 }),
-    PrevOffset = PrevStreamState#outbound_stream_state.offset,
-    %EncodedDataPayload = quic_data_kv:encode(DataPayload),
-    NewOffset = PrevOffset + iolist_size(DataPayload),
-    NewStreamState = PrevStreamState#outbound_stream_state{ offset = NewOffset },
-    NewOutboundStreams = maps:put(StreamId, NewStreamState, OutboundStreams),
-
-    NewState = State#state{ outbound_streams = NewOutboundStreams },
+send_stream_data(StreamId, Data, State, OptionalHeaders) ->
+    StreamState = stream_state(StreamId, State),
+    {Offset, NewStreamState} = quic_stream:on_outbound_data(Data, StreamState),
+    NewState = set_stream_state(StreamId, State, NewStreamState),
     StreamFrame = #stream_frame{ stream_id = StreamId,
-                                 offset = PrevOffset,
-                                 data_payload = DataPayload },
+                                 offset = Offset,
+                                 data_payload = Data },
     send_frame(StreamFrame, NewState, OptionalHeaders).
-
-%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
--spec send_stream_data_kv(stream_id(), data_kv(), state())
-        -> state().
-send_stream_data_kv(StreamId, DataKv, State) ->
-    send_stream_data_kv(StreamId, DataKv, State, []).
-
--spec send_stream_data_kv(stream_id(), data_kv(), state(),
-                          OptionalHeaders :: [{version_header | diversification_nonce_header, iodata()}])
-        -> state().
-send_stream_data_kv(StreamId, DataKv, State, OptionalHeaders) ->
-    DataPayload = quic_data_kv:encode(DataKv),
-    send_stream_data_payload(StreamId, DataPayload, State, OptionalHeaders).
-
 
 %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
 -spec setup_connection(state()) -> state().
 setup_connection(#state{ connection_id = undefined,
-                         crypto_state = undefined,
+                         crypto_stream = undefined,
                          outbound_packet_number = undefined } = State) ->
+        %-> {Reactions :: [quic_connection:stream_reaction()], State :: state()}.
+    StreamId = ?CRYPTO_NEGOTIATION_STREAM_ID,
     ConnectionId = crypto:rand_uniform(0, 1 bsl 64),
     FlowState = quic_flow:initial_state(),
-    CryptoReactions = quic_crypto:on_start(ConnectionId),
+    {CryptoStreamReactions, CryptoStream} = quic_crypto:on_start(StreamId, ConnectionId),
     NewState = State#state{ connection_id = ConnectionId,
                             outbound_packet_number = 0,
-                            flow_state = FlowState },
-    handle_stream_reactions(?CRYPTO_NEGOTIATION_STREAM_ID, CryptoReactions, NewState,
-                            #state.crypto_state).
+                            flow_state = FlowState,
+                            crypto_stream = CryptoStream },
+    handle_stream_reactions(StreamId, CryptoStreamReactions, NewState).
 
 -spec handle_received_data(binary(), state()) -> state().
 handle_received_data(Data, State) ->
-    {Packet, NewCryptoState} = quic_packet:decode(Data, server, State#state.crypto_state),
+    CryptoState = crypto_state(State),
+    {Packet, NewCryptoState} = quic_packet:decode(Data, server, CryptoState),
     FlowReactions = quic_flow:on_receive_packet(Packet, State#state.flow_state),
     %lager:debug("got packet: ~p", [QuicPacket]),
-    StateB = State#state{ crypto_state = NewCryptoState },
-    handle_flow_reactions(FlowReactions, StateB).
+    NewState = set_crypto_state(State, NewCryptoState),
+    handle_flow_reactions(FlowReactions, NewState).
 
 -spec handle_received_packet(quic_packet(), state()) -> state().
 handle_received_packet(#regular_packet{ packet_number = PacketNumber,
@@ -234,87 +210,51 @@ handle_received_packet(#regular_packet{ packet_number = PacketNumber,
       Frames).
 
 -spec handle_received_frame(packet_number(), frame(), state()) -> state().
-handle_received_frame(_PacketNumber,
-                      #stream_frame{} = Frame,
-                      #state{ inbound_streams = InboundStreams } = State) ->
+handle_received_frame(_PacketNumber, Frame, State)
+  when is_record(Frame, stream_frame) ->
     #stream_frame{ stream_id = StreamId,
                    offset = Offset,
-                   data_payload = DataPayload } = Frame,
-    lager:debug("got frame for stream ~p / offset ~p / length ~p", [StreamId, Offset, iolist_size(DataPayload)]),
-    {CompleteDataPayload, StreamState2} =
-        case maps:find(StreamId, InboundStreams) of
-            {ok, #inbound_stream_state{ pending_data = PrevPendingData,
-                                        expected_offset = ExpectedOffset } = StreamState} ->
-                ?ASSERT(Offset =:= ExpectedOffset,
-                        {unconsecutive_stream_frames_are_unsupported_yet,
-                         [{offset, Offset},
-                          {expected_offset, ExpectedOffset},
-                          {size_prev_pending_data, iolist_size(PrevPendingData)}]}),
-                {iolist_to_binary([PrevPendingData, DataPayload]),
-                 StreamState#inbound_stream_state{ pending_data = "",
-                                                   expected_offset = Offset + byte_size(DataPayload) }};
-            error ->
-                {DataPayload,
-                 #inbound_stream_state{ pending_data = "",
-                                        expected_offset = Offset + byte_size(DataPayload) }}
-        end,
+                   data_payload = Data } = Frame,
 
-    case quic_data_kv:decode(CompleteDataPayload) of
-        #data_kv{} = DataKv ->
-            NewInboundStreams = maps:put(StreamId, StreamState2, InboundStreams),
-            NewState = State#state{ inbound_streams = NewInboundStreams },
-            handle_inbound_stream(StreamId, DataKv, NewState);
-        incomplete ->
-            lager:debug("ignoring incomplete stream frame for stream ~p", [StreamId]),
-            StreamState3 = StreamState2#inbound_stream_state{
-                             pending_data = CompleteDataPayload
-                             % @TODO: it can be so much improved
-                             },
-
-            NewInboundStreams = maps:put(StreamId, StreamState3, InboundStreams),
-            State#state{ inbound_streams = NewInboundStreams }
-    end;
-handle_received_frame(_PacketNumber, #ack_frame{} = AckFrame, State) ->
+    StreamState = stream_state(StreamId, State),
+    {Reactions, NewStreamState} = quic_stream:on_inbound_data(Offset, Data, StreamState),
+    NewState = set_stream_state(StreamId, State, NewStreamState),
+    %lager:debug_unsafe("handling reactions: ~p~nfor for stream state ~p",
+    %                   [Reactions, NewStreamState]),
+    handle_stream_reactions(StreamId, Reactions, NewState);
+handle_received_frame(_PacketNumber, Frame, State)
+  when is_record(Frame, ack_frame) ->
     % @TODO
-    lager:debug("got ack frame: ~p", [lager:pr(AckFrame, ?MODULE)]),
+    lager:debug("got ack frame: ~p", [lager:pr(Frame, ?MODULE)]),
     State;
-handle_received_frame(PacketNumber, #stop_waiting_frame{} = StopWaitingFrame, State) ->
-    lager:debug("got stop_waiting_frame: ~p", [StopWaitingFrame]),
+handle_received_frame(PacketNumber, Frame, State)
+  when is_record(Frame, stop_waiting_frame) ->
+    lager:debug("got stop_waiting_frame: ~p", [Frame]),
     FlowState = State#state.flow_state,
-    FlowReactions = quic_flow:on_receive_stop_waiting(PacketNumber, StopWaitingFrame, FlowState),
+    FlowReactions = quic_flow:on_receive_stop_waiting(PacketNumber, Frame, FlowState),
     handle_flow_reactions(FlowReactions, State);
-handle_received_frame(_PacketNumber, #padding_frame{}, State) ->
+handle_received_frame(_PacketNumber, Frame, State)
+  when is_record(Frame, padding_frame) ->
     % ignore
     State.
 
--spec handle_inbound_stream(StreamId :: uint32(),
-                            DataKv :: data_kv(),
-                            State :: state()) -> state().
-handle_inbound_stream(StreamId, DataKv, State)
-  when StreamId =:= ?CRYPTO_NEGOTIATION_STREAM_ID ->
-    CryptoState = State#state.crypto_state,
-    CryptoReactions = quic_crypto:on_data_kv(DataKv, CryptoState),
-    handle_stream_reactions(StreamId, CryptoReactions, State, #state.crypto_state).
-
 %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
-handle_stream_reactions(StreamId, Reactions, State, SubStateKey) ->
+-spec handle_stream_reactions(stream_id(), [stream_reaction()], state()) -> state().
+handle_stream_reactions(StreamId, Reactions, State) ->
     lists:foldl(
       fun (Reaction, StateAcc) ->
-              handle_stream_reaction(StreamId, Reaction, StateAcc, SubStateKey)
+              handle_stream_reaction(StreamId, Reaction, StateAcc)
       end,
       State,
       Reactions).
 
-handle_stream_reaction(StreamId, {send, {data_payload, DataPayload}}, State, _SubStateKey) ->
-    send_stream_data_payload(StreamId, DataPayload, State);
-handle_stream_reaction(StreamId, {send, {data_payload, DataPayload}, OptionalHeaders}, State, _SubStateKey) ->
-    send_stream_data_payload(StreamId, DataPayload, State, OptionalHeaders);
-handle_stream_reaction(StreamId, {send, {data_kv, DataKv}}, State, _SubStateKey) ->
-    send_stream_data_kv(StreamId, DataKv, State);
-handle_stream_reaction(StreamId, {send, {data_kv, DataPayload}, OptionalHeaders}, State, _SubStateKey) ->
-    send_stream_data_kv(StreamId, DataPayload, State, OptionalHeaders);
-handle_stream_reaction(_StreamId, {change_state, NewSubState}, State, SubStateKey) ->
-    setelement(SubStateKey, State, NewSubState).
+-spec handle_stream_reaction(stream_id(), stream_reaction(), state()) -> state().
+handle_stream_reaction(StreamId, {change_state, NewStreamState}, State) ->
+    set_stream_state(StreamId, State, NewStreamState);
+handle_stream_reaction(StreamId, {send, Data}, State) ->
+    send_stream_data(StreamId, Data, State);
+handle_stream_reaction(StreamId, {send, Data, OptionalHeaders}, State) ->
+    send_stream_data(StreamId, Data, State, OptionalHeaders).
 
 %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
 handle_flow_reactions(Reactions, State) ->
@@ -326,3 +266,25 @@ handle_flow_reaction({change_state, NewFlowState}, State) ->
     State#state{ flow_state = NewFlowState };
 handle_flow_reaction({send, {frame, Frame}}, State) ->
     send_frame(Frame, State).
+
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+crypto_state(#state{ crypto_stream = CryptoStream }) ->
+    quic_stream:callback_state(CryptoStream).
+
+set_crypto_state(#state{ crypto_stream = CryptoStream } = State, CryptoState) ->
+    NewCryptoStream = quic_stream:set_callback_state(CryptoStream, CryptoState),
+    State#state{ crypto_stream = NewCryptoStream }.
+
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+stream_state(StreamId, State) when StreamId =:= ?CRYPTO_NEGOTIATION_STREAM_ID ->
+    State#state.crypto_stream;
+stream_state(StreamId, State) ->
+    RegularStreams = State#state.regular_streams,
+    maps:get(StreamId, RegularStreams).
+
+set_stream_state(StreamId, State, StreamState) when StreamId =:= ?CRYPTO_NEGOTIATION_STREAM_ID ->
+    State#state{ crypto_stream = StreamState };
+set_stream_state(StreamId, State, StreamState) ->
+    RegularStreams = State#state.regular_streams,
+    NewRegularStreams = maps:put(StreamId, StreamState, RegularStreams),
+    State#state{ regular_streams = NewRegularStreams }.

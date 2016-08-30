@@ -6,6 +6,7 @@
 %% API Function Exports
 %% ------------------------------------------------------------------
 
+-export([fully_decode/1]).
 -export([decode/1]).
 -export([decode_tagged_values/1]).
 -export([decode_tag_list/1]).
@@ -14,16 +15,29 @@
 -export([encode_tag_list/1]).
 
 %% ------------------------------------------------------------------
+%% Type Exports
+%% ------------------------------------------------------------------
+
+-export_type([data_kv/0]).
+
+%% ------------------------------------------------------------------
 %% API Function Definitions
 %% ------------------------------------------------------------------
 
-decode(<<PayloadTag:4/binary, RemainingData/binary>>) ->
-    case decode_tagged_values(RemainingData) of
+fully_decode(Data) ->
+    {DataKv, <<>>} = decode(Data),
+    DataKv.
+
+decode(<<PayloadTag:4/binary, Body/binary>>) ->
+    case decode_tagged_values(Body) of
         incomplete -> incomplete;
-        TaggedValuesMap when is_map(TaggedValuesMap) ->
-            #data_kv{ tag = decode_tag(PayloadTag),
-                      tagged_values = TaggedValuesMap }
-    end.
+        {TaggedValuesMap, RemainingData} ->
+            {#data_kv{ tag = decode_tag(PayloadTag),
+                       tagged_values = TaggedValuesMap },
+             RemainingData}
+    end;
+decode(<<_/binary>>) ->
+    incomplete.
 
 decode_tagged_values(<<TaggedValuesLength:2/little-unsigned-integer-unit:8, 0:16,
                        Body/binary>>) ->
@@ -43,7 +57,7 @@ decode_tagged_values(<<TaggedValuesLength:2/little-unsigned-integer-unit:8, 0:16
     case LastElementEndOffset > iolist_size(EncodedValues) of
         true -> incomplete;
         false ->
-            {TaggedValuesList, _} =
+            {TaggedValuesList, FinalEndOffset} =
                 lists:mapfoldl(
                   fun ({Tag, EndOffset}, StartOffset) ->
                           {{Tag, binary:part(EncodedValues, StartOffset, EndOffset - StartOffset)},
@@ -51,7 +65,8 @@ decode_tagged_values(<<TaggedValuesLength:2/little-unsigned-integer-unit:8, 0:16
                   end,
                   0,
                   TaggedValueEndOffsets),
-            maps:from_list(TaggedValuesList)
+            {maps:from_list(TaggedValuesList),
+             binary:part(EncodedValues, FinalEndOffset, byte_size(EncodedValues) - FinalEndOffset)}
     end.
 
 -spec decode_tag_list(binary()) -> [binary(), ...].
