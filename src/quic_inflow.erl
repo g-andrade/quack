@@ -9,7 +9,7 @@
 
 -export([initial_state/0]).
 -export([on_receive_packet/2]).
--export([on_receive_stop_waiting/3]).
+-export([on_receive_stop_waiting/2]).
 
 %% ------------------------------------------------------------------
 %% Macro Definitions
@@ -61,16 +61,17 @@ on_receive_packet(#regular_packet{ packet_number = PacketNumber } = Packet,
              {handle_received_packet, Packet}]
     end.
 
-on_receive_stop_waiting(_PacketNumber, _StopWaitingFrame, _State) ->
-    [].
-    %Delta = StopWaitingFrame#stop_waiting_frame.least_unacked_delta,
-    %SmallestInboundUnackedPacketNumber = State#state.smallest_inbound_unacked_packet_number,
-    %NewSmallestInboundUnackedPacketNumber =
-    %    max(SmallestInboundUnackedPacketNumber, PacketNumber - Delta),
-    %NewState = State#state{
-    %             smallest_inbound_unacked_packet_number = NewSmallestInboundUnackedPacketNumber
-    %            },
-    %[{change_state, NewState}].
+on_receive_stop_waiting(StopWaitingFrame, State) ->
+    StopWaitingPacketNumber = StopWaitingFrame#stop_waiting_frame.least_unacked_packet_number,
+    InboundPacketBlocks = State#state.inbound_packet_blocks,
+    NewInboundPacketBlocks =
+        lists:dropwhile(
+          fun (#inbound_packet_block{ largest_packet_number = LargestPacketNumber }) ->
+                  LargestPacketNumber < StopWaitingPacketNumber
+          end,
+          InboundPacketBlocks),
+    NewState = State#state{ inbound_packet_blocks = NewInboundPacketBlocks },
+    [{change_state, NewState}].
 
 %% ------------------------------------------------------------------
 %% Internal Function Definitions

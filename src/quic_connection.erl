@@ -201,17 +201,16 @@ handle_received_data(Data, State) ->
     handle_inflow_reactions(InflowReactions, NewState).
 
 -spec handle_received_packet(quic_packet(), state()) -> state().
-handle_received_packet(#regular_packet{ packet_number = PacketNumber,
-                                        frames = Frames }, State) ->
+handle_received_packet(#regular_packet{ frames = Frames }, State) ->
     lists:foldl(
       fun (Frame, StateAcc) ->
-              handle_received_frame(PacketNumber, Frame, StateAcc)
+              handle_received_frame(Frame, StateAcc)
       end,
       State,
       Frames).
 
--spec handle_received_frame(packet_number(), frame(), state()) -> state().
-handle_received_frame(_PacketNumber, Frame, State)
+-spec handle_received_frame(frame(), state()) -> state().
+handle_received_frame(Frame, State)
   when is_record(Frame, stream_frame) ->
     #stream_frame{ stream_id = StreamId,
                    offset = Offset,
@@ -223,20 +222,20 @@ handle_received_frame(_PacketNumber, Frame, State)
     %lager:debug_unsafe("handling reactions: ~p~nfor for stream state ~p",
     %                   [Reactions, NewStreamState]),
     handle_stream_reactions(StreamId, Reactions, NewState);
-handle_received_frame(_PacketNumber, Frame, State)
+handle_received_frame(Frame, State)
   when is_record(Frame, ack_frame) ->
     OutflowState = State#state.outflow_state,
     %lager:debug("got ack frame: ~p", [lager:pr(Frame, ?MODULE)]),
     {Reactions, NewOutflowState} = quic_outflow:on_inbound_ack_frame(Frame, OutflowState),
     NewState = State#state{ outflow_state = NewOutflowState },
     handle_outflow_reactions(Reactions, NewState);
-handle_received_frame(PacketNumber, Frame, State)
+handle_received_frame(Frame, State)
   when is_record(Frame, stop_waiting_frame) ->
     lager:debug("got stop_waiting_frame: ~p", [Frame]),
     InflowState = State#state.inflow_state,
-    InflowReactions = quic_inflow:on_receive_stop_waiting(PacketNumber, Frame, InflowState),
+    InflowReactions = quic_inflow:on_receive_stop_waiting(Frame, InflowState),
     handle_inflow_reactions(InflowReactions, State);
-handle_received_frame(_PacketNumber, Frame, State)
+handle_received_frame(Frame, State)
   when is_record(Frame, padding_frame) ->
     % ignore
     State.
