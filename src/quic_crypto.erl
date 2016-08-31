@@ -47,7 +47,7 @@
           connection_id :: connection_id(),
           keys :: keys(),
           aead_algorithm :: known_aead_algorithm(),
-          %have_encrypted_packets_been_received :: boolean(),
+          have_encrypted_packets_been_received :: boolean(),
           has_diversified :: boolean(),
           params :: initial_encryption_params()
          }).
@@ -172,8 +172,8 @@ decrypt_packet_payload(_PacketNumber, HeadersData, EncryptedPayload, State)
     ?ASSERT(Fnv1Hash =:= ExpectedFnv1Hash, invalid_unencrypted_packet),
     {Payload, State};
 decrypt_packet_payload(PacketNumber, HeadersData, EncryptedPayload, State)
-  when is_record(State, initial_encryption) ->
-    % @TODO handle unencrypted packets that might arrive before first encrypted
+  when is_record(State, initial_encryption),
+       State#initial_encryption.have_encrypted_packets_been_received ->
     #initial_encryption{ aead_algorithm = AeadAlgorithm,
                          keys = Keys } = State,
     Result = try_decrypt_aead_packet_payload(
@@ -181,6 +181,23 @@ decrypt_packet_payload(PacketNumber, HeadersData, EncryptedPayload, State)
                AeadAlgorithm, Keys),
     ?ASSERT(Result =/= error, invalid_initial_encryption_packet),
     {Result, State};
+decrypt_packet_payload(PacketNumber, HeadersData, EncryptedPayload, State)
+  when is_record(State, initial_encryption) ->
+    ConnectionId = State#initial_encryption.connection_id,
+    PlainEncryption = #plain_encryption{ connection_id = ConnectionId },
+    case catch decrypt_packet_payload(PacketNumber, HeadersData, EncryptedPayload,
+                                      PlainEncryption)
+    of
+        {'EXIT', invalid_unencrypted_packet} ->
+            % let's assume this is the first encrypted packet
+            NewState =
+                State#initial_encryption{
+                  have_encrypted_packets_been_received = true },
+            decrypt_packet_payload(PacketNumber, HeadersData,
+                                   EncryptedPayload, NewState);
+        {Payload, _} when is_list(Payload); is_binary(Payload) ->
+            {Payload, State}
+    end;
 decrypt_packet_payload(PacketNumber, HeadersData, EncryptedPayload, State)
   when is_record(State, forward_secure_encryption) ->
     #forward_secure_encryption{ aead_algorithm = AeadAlgorithm,
@@ -271,7 +288,7 @@ initial_encryption(ConnectionId, AeadAlgorithm, InitialEncryptionParams) ->
        connection_id = ConnectionId,
        keys = Keys,
        aead_algorithm = AeadAlgorithm,
-       %have_encrypted_packets_been_received = false,
+       have_encrypted_packets_been_received = false,
        has_diversified = false,
        params = InitialEncryptionParams }.
 
