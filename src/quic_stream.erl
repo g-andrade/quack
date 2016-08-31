@@ -45,7 +45,7 @@
 -type reaction() :: ({change_state, NewState :: term()} |
                      {send, Value :: outbound_value()} |
                      {send, Value :: outbound_value(),
-                      OptionalHeaders :: [quic_connection:optional_header()]}).
+                      OptionalPacketHeaders :: [quic_connection:optional_packet_header()]}).
 -export_type([reaction/0]).
 
 -type outbound_value() :: iodata() | data_kv() | {pre_encoded, iodata()}.

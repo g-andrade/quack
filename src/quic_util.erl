@@ -16,6 +16,7 @@
 -export([coalesce/2]).
 -export([binary_to_hex/1]).
 -export([filtermapfoldl/3]).
+-export([now_us/0]).
 
 %% ------------------------------------------------------------------
 %% API Function Definitions
@@ -90,3 +91,8 @@ filtermapfoldl(FilterMapFoldFun, Acc0, List) ->
 
     FilterMapped = lists:reverse(RevFilterMapped),
     {FilterMapped, AccN}.
+
+now_us() ->
+    os:system_time(micro_seconds).
+
+

@@ -82,7 +82,9 @@ encode(#regular_packet{} = Packet, _Origin, CryptoState) ->
         maybe_encode_diversification_nonce(Packet#regular_packet.diversification_nonce),
     {EncodedPacketNumber, PacketNumberEncoding} =
         quic_proto_varint:encode_u48(PacketNumber),
-    EncodedFrames = quic_frame:encode_frames(Packet#regular_packet.frames, PacketNumberEncoding),
+    EncodedFrames =
+        quic_frame:encode_frames(Packet#regular_packet.frames,
+                                 PacketNumber, PacketNumberEncoding),
 
     EncodedFlags =
         lists:foldl(fun erlang:'bor'/2, 0,
@@ -105,7 +107,7 @@ encode(#regular_packet{} = Packet, _Origin, CryptoState) ->
             {packet_too_big, PreliminaryEncodedPacketSize, Packet}),
 
     PaddedEncodedFrames = maybe_pad_frames(?MAX_IPV4_PACKET_SIZE, PreliminaryEncodedPacketSize,
-                                           EncodedFrames, PacketNumberEncoding),
+                                           EncodedFrames, PacketNumber, PacketNumberEncoding),
 
     {EncryptedPayload, NewCryptoState} =
         quic_crypto:encrypt_packet_payload(PacketNumber, EncodedHeader,
@@ -159,7 +161,7 @@ decode(ChunkA, _Origin, PublicFlags,
     {DecryptedBody, CryptoStateC} =
         quic_crypto:decrypt_packet_payload(PacketNumber, BodyPrecedingData, Body, CryptoStateB),
 
-    Frames = quic_frame:decode_frames(DecryptedBody, PacketNumberEncoding),
+    Frames = quic_frame:decode_frames(DecryptedBody, PacketNumber, PacketNumberEncoding),
 
     {#regular_packet{ connection_id = ConnectionId,
                       version = Version,
@@ -232,10 +234,14 @@ maybe_encode_diversification_nonce(DiversificationNonce) ->
 %% Padding
 %% ------------------------------------------------------------------
 
-maybe_pad_frames(MaxPacketsize, PredictedPacketSize, EncodedFrames, PacketNumberEncoding) ->
+maybe_pad_frames(MaxPacketsize, PredictedPacketSize, EncodedFrames,
+                 PacketNumber, PacketNumberEncoding) ->
     MissingSize = MaxPacketsize - PredictedPacketSize,
     case MissingSize > 0 of
-        false -> EncodedFrames;
-        true -> quic_frame:append_padding_to_encoded_frames(
-                  EncodedFrames, MissingSize, PacketNumberEncoding)
+        false ->
+            EncodedFrames;
+        true ->
+            quic_frame:append_padding_to_encoded_frames(
+              EncodedFrames, MissingSize, PacketNumber,
+              PacketNumberEncoding)
     end.

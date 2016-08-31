@@ -1,27 +1,30 @@
 -module(quic_frame).
 
+-include("quic.hrl").
 -include("quic_frame.hrl").
 
 %% ------------------------------------------------------------------
 %% API Function Exports
 %% ------------------------------------------------------------------
 
--export([append_padding_to_encoded_frames/3]).
--export([decode_frames/2]).
--export([encode_frames/2]).
+-export([append_padding_to_encoded_frames/4]).
+-export([decode_frames/3]).
+-export([encode_frames/3]).
 
 %% ------------------------------------------------------------------
 %% Padding
 %% ------------------------------------------------------------------
 
-append_padding_to_encoded_frames(EncodedFrames, MissingSize, PacketNumberEncoding) when MissingSize > 0 ->
-    [EncodedFrames, encode_frame(#padding_frame{ size = MissingSize - 1 }, PacketNumberEncoding)].
+append_padding_to_encoded_frames(EncodedFrames, MissingSize, PacketNumber, PacketNumberEncoding)
+  when MissingSize > 0 ->
+    [EncodedFrames, encode_frame(#padding_frame{ size = MissingSize - 1 },
+                                 PacketNumber, PacketNumberEncoding)].
 
 %% ------------------------------------------------------------------
 %% Frame sequence decoding
 %% ------------------------------------------------------------------
 
-decode_frames(<<>>, _PacketNumberEncoding) ->
+decode_frames(<<>>, _PacketNumber, _PacketNumberEncoding) ->
     [];
 decode_frames(<<1:1,
                 FinBit:1,
@@ -29,12 +32,12 @@ decode_frames(<<1:1,
                 OffsetHeaderEncoding:3,
                 StreamIdEncoding:2,
                 Data/binary>>,
-              PacketNumberEncoding) ->
+              PacketNumber, PacketNumberEncoding) ->
     % Stream frame (special)
     {RemainingData, Frame} = quic_frame_stream:decode(Data, FinBit, DataLengthBit,
                                                       OffsetHeaderEncoding,
                                                       StreamIdEncoding),
-    [Frame | decode_frames(RemainingData, PacketNumberEncoding)];
+    [Frame | decode_frames(RemainingData, PacketNumber, PacketNumberEncoding)];
 decode_frames(<<0:1,
                 1:1,
                 MultipleAckRangesBit:1,
@@ -42,59 +45,59 @@ decode_frames(<<0:1,
                 LargestAckedEncoding:2,
                 AckBlockEncoding:2,
                 Data/binary>>,
-              PacketNumberEncoding) ->
+              PacketNumber, PacketNumberEncoding) ->
     % ACK frame (special)
     {RemainingData, Frame} = quic_frame_ack:decode(Data, MultipleAckRangesBit,
                                                    LargestAckedEncoding,
                                                    AckBlockEncoding),
-    [Frame | decode_frames(RemainingData, PacketNumberEncoding)];
+    [Frame | decode_frames(RemainingData, PacketNumber, PacketNumberEncoding)];
 %decode_frames(<<0:2,
 %                1:1,
 %                _:5, % unused,
 %                _/binary>>) ->
 %    % Congestion feedback (special - unspecified yet)
 %    exit({unspecified, congestion_feedback});
-decode_frames(<<2#00000000:8, Data/binary>>, PacketNumberEncoding) ->
+decode_frames(<<2#00000000:8, Data/binary>>, PacketNumber, PacketNumberEncoding) ->
     % Padding frame
     {RemainingData, Frame} = decode_padding_frame(Data),
-    [Frame | decode_frames(RemainingData, PacketNumberEncoding)];
-decode_frames(<<2#00000001:8, Data/binary>>, PacketNumberEncoding) ->
+    [Frame | decode_frames(RemainingData, PacketNumber, PacketNumberEncoding)];
+decode_frames(<<2#00000001:8, Data/binary>>, PacketNumber, PacketNumberEncoding) ->
     % Reset stream frame
     {RemainingData, Frame} = decode_reset_stream_frame(Data),
-    [Frame | decode_frames(RemainingData, PacketNumberEncoding)];
-decode_frames(<<2#00000010:8, Data/binary>>, PacketNumberEncoding) ->
+    [Frame | decode_frames(RemainingData, PacketNumber, PacketNumberEncoding)];
+decode_frames(<<2#00000010:8, Data/binary>>, PacketNumber, PacketNumberEncoding) ->
     % Connection close frame
     {RemainingData, Frame} = decode_connection_close_frame(Data),
-    [Frame | decode_frames(RemainingData, PacketNumberEncoding)];
-decode_frames(<<2#00000011:8, Data/binary>>, PacketNumberEncoding) ->
+    [Frame | decode_frames(RemainingData, PacketNumber, PacketNumberEncoding)];
+decode_frames(<<2#00000011:8, Data/binary>>, PacketNumber, PacketNumberEncoding) ->
     % Go away frame
     {RemainingData, Frame} = decode_go_away_frame(Data),
-    [Frame | decode_frames(RemainingData, PacketNumberEncoding)];
-decode_frames(<<2#00000100:8, Data/binary>>, PacketNumberEncoding) ->
+    [Frame | decode_frames(RemainingData, PacketNumber, PacketNumberEncoding)];
+decode_frames(<<2#00000100:8, Data/binary>>, PacketNumber, PacketNumberEncoding) ->
     % Window update frame
     {RemainingData, Frame} = decode_window_update_frame(Data),
-    [Frame | decode_frames(RemainingData, PacketNumberEncoding)];
-decode_frames(<<2#00000101:8, Data/binary>>, PacketNumberEncoding) ->
+    [Frame | decode_frames(RemainingData, PacketNumber, PacketNumberEncoding)];
+decode_frames(<<2#00000101:8, Data/binary>>, PacketNumber, PacketNumberEncoding) ->
     % Blocked frame
     {RemainingData, Frame} = decode_blocked_frame(Data),
-    [Frame | decode_frames(RemainingData, PacketNumberEncoding)];
-decode_frames(<<2#00000110:8, Data/binary>>, PacketNumberEncoding) ->
+    [Frame | decode_frames(RemainingData, PacketNumber, PacketNumberEncoding)];
+decode_frames(<<2#00000110:8, Data/binary>>, PacketNumber, PacketNumberEncoding) ->
     % Stop waiting frame
-    {RemainingData, Frame} = decode_stop_waiting_frame(Data, PacketNumberEncoding),
-    [Frame | decode_frames(RemainingData, PacketNumberEncoding)];
-decode_frames(<<2#00000111:8, Data/binary>>, PacketNumberEncoding) ->
+    {RemainingData, Frame} = decode_stop_waiting_frame(Data, PacketNumber, PacketNumberEncoding),
+    [Frame | decode_frames(RemainingData, PacketNumber, PacketNumberEncoding)];
+decode_frames(<<2#00000111:8, Data/binary>>, PacketNumber, PacketNumberEncoding) ->
     % Ping frame
     {RemainingData, Frame} = decode_ping_frame(Data),
-    [Frame | decode_frames(RemainingData, PacketNumberEncoding)].
+    [Frame | decode_frames(RemainingData, PacketNumber, PacketNumberEncoding)].
 
 %% ------------------------------------------------------------------
 %% Frame sequence encoding
 %% ------------------------------------------------------------------
 
-encode_frames(Frames, PacketNumberEncoding) ->
-    [encode_frame(Frame, PacketNumberEncoding) || Frame <- Frames].
+encode_frames(Frames, _PacketNumber, PacketNumberEncoding) ->
+    [encode_frame(Frame, _PacketNumber, PacketNumberEncoding) || Frame <- Frames].
 
-encode_frame(Frame, _PacketNumberEncoding) when is_record(Frame, stream_frame);
+encode_frame(Frame, _PacketNumber, _PacketNumberEncoding) when is_record(Frame, stream_frame);
                                                is_record(Frame, stream_fin_frame) ->
     {Data, FinBit, DataLengthBit, OffsetHeaderEncoding, StreamIdEncoding} =
         quic_frame_stream:encode(Frame),
@@ -104,7 +107,7 @@ encode_frame(Frame, _PacketNumberEncoding) when is_record(Frame, stream_frame);
        OffsetHeaderEncoding:3,
        StreamIdEncoding:2>>,
      Data];
-encode_frame(#ack_frame{} = Frame, _PacketNumberEncoding) ->
+encode_frame(#ack_frame{} = Frame, _PacketNumber, _PacketNumberEncoding) ->
     {Data, MultipleAckRangesBit, LargestAckedEncoding, AckBlockEncoding} =
         quic_frame_ack:encode(Frame),
     [<<0:1,
@@ -114,21 +117,21 @@ encode_frame(#ack_frame{} = Frame, _PacketNumberEncoding) ->
        LargestAckedEncoding:2,
        AckBlockEncoding:2>>,
      Data];
-encode_frame(#padding_frame{} = Frame, _PacketNumberEncoding) ->
+encode_frame(#padding_frame{} = Frame, _PacketNumber, _PacketNumberEncoding) ->
     [2#00000000, encode_padding_frame(Frame)];
-encode_frame(#reset_stream_frame{} = Frame, _PacketNumberEncoding) ->
+encode_frame(#reset_stream_frame{} = Frame, _PacketNumber, _PacketNumberEncoding) ->
     [2#00000001, encode_reset_stream_frame(Frame)];
-encode_frame(#connection_close_frame{} = Frame, _PacketNumberEncoding) ->
+encode_frame(#connection_close_frame{} = Frame, _PacketNumber, _PacketNumberEncoding) ->
     [2#00000010, encode_connection_close_frame(Frame)];
-encode_frame(#go_away_frame{} = Frame, _PacketNumberEncoding) ->
+encode_frame(#go_away_frame{} = Frame, _PacketNumber, _PacketNumberEncoding) ->
     [2#00000011, encode_go_away_frame(Frame)];
-encode_frame(#window_update_frame{} = Frame, _PacketNumberEncoding) ->
+encode_frame(#window_update_frame{} = Frame, _PacketNumber, _PacketNumberEncoding) ->
     [2#00000100, encode_window_update_frame(Frame)];
-encode_frame(#blocked_frame{} = Frame, _PacketNumberEncoding) ->
+encode_frame(#blocked_frame{} = Frame, _PacketNumber, _PacketNumberEncoding) ->
     [2#00000101, encode_blocked_frame(Frame)];
-encode_frame(#stop_waiting_frame{} = Frame, PacketNumberEncoding) ->
-    [2#00000110, encode_stop_waiting_frame(Frame, PacketNumberEncoding)];
-encode_frame(#ping_frame{} = Frame, _PacketNumberEncoding) ->
+encode_frame(#stop_waiting_frame{} = Frame, PacketNumber, PacketNumberEncoding) ->
+    [2#00000110, encode_stop_waiting_frame(Frame, PacketNumber, PacketNumberEncoding)];
+encode_frame(#ping_frame{} = Frame, _PacketNumber, _PacketNumberEncoding) ->
     [2#00000111, encode_ping_frame(Frame)].
 
 %% ------------------------------------------------------------------
@@ -235,13 +238,17 @@ encode_blocked_frame(#blocked_frame{ stream_id = StreamId }) ->
 %% Stop waiting frame handling
 %% ------------------------------------------------------------------
 
-decode_stop_waiting_frame(Data, PacketNumberEncoding) ->
+decode_stop_waiting_frame(Data, PacketNumber, PacketNumberEncoding) ->
     {RemainingData, LeastUnackedDelta} = quic_proto_varint:decode_u48(Data, PacketNumberEncoding),
+    LeastUnackedPacketNumber = PacketNumber - LeastUnackedDelta,
+    ?ASSERT(LeastUnackedPacketNumber >= 0, invalid_least_unacked_delta),
     {RemainingData,
-     #stop_waiting_frame{ least_unacked_delta = LeastUnackedDelta }}.
+     #stop_waiting_frame{ least_unacked_packet_number = LeastUnackedPacketNumber }}.
 
-encode_stop_waiting_frame(#stop_waiting_frame{ least_unacked_delta = LeastUnackedDelta },
-                          PacketNumberEncoding) ->
+encode_stop_waiting_frame(#stop_waiting_frame{ least_unacked_packet_number = LeastUnackedPacketNumber },
+                          PacketNumber, PacketNumberEncoding) ->
+    LeastUnackedDelta = PacketNumber - LeastUnackedPacketNumber,
+    ?ASSERT(LeastUnackedPacketNumber =< PacketNumber, invalid_least_unacked_delta),
     quic_proto_varint:encode_u48(LeastUnackedDelta, PacketNumberEncoding).
 
 %% ------------------------------------------------------------------

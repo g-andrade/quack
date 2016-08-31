@@ -142,7 +142,7 @@
 %% ------------------------------------------------------------------
 
 -record(stop_waiting_frame, {
-          least_unacked_delta :: packet_number()
+          least_unacked_packet_number :: packet_number()
          }).
 -type stop_waiting_frame() :: #stop_waiting_frame{}.
 

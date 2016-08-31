@@ -142,7 +142,7 @@ on_start_cb([ConnectionId]) ->
     InchoateDataKv = inchoate_data_kv(),
     StreamDataPacking = data_kv,
     StreamCallbackState = #plain_encryption{ connection_id = ConnectionId },
-    StreamReactions = [{send, InchoateDataKv, [{version_header, ?QUIC_VERSION}]}],
+    StreamReactions = [{send, InchoateDataKv, [{version, ?QUIC_VERSION}]}],
     {StreamDataPacking, StreamCallbackState, StreamReactions}.
 
 on_inbound_cb([DataKv], #plain_encryption{} = State)

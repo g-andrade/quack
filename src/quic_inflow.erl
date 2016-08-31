@@ -57,7 +57,7 @@ on_receive_packet(#regular_packet{ packet_number = PacketNumber } = Packet,
             NewState = State#state{ inbound_packet_blocks = NewInboundPacketBlocks },
             AckFrame = generate_ack_frame(NewState#state.inbound_packet_blocks),
             [{change_state, NewState},
-             {send, AckFrame},
+             {send_frame, AckFrame},
              {handle_received_packet, Packet}]
     end.
 
@@ -76,10 +76,6 @@ on_receive_stop_waiting(_PacketNumber, _StopWaitingFrame, _State) ->
 %% Internal Function Definitions
 %% ------------------------------------------------------------------
 
-now_us() ->
-    os:system_time(micro_seconds).
-
-
 generate_ack_frame([NewestBlock | _] = InboundPacketBlocks) ->
     [OldestBlock | RemainingBlocks] =lists:reverse(InboundPacketBlocks),
 
@@ -87,7 +83,7 @@ generate_ack_frame([NewestBlock | _] = InboundPacketBlocks) ->
        largest_packet_number = LargestReceived,
        largest_packet_number_timestamp = LargestReceivedTimestamp
       } = NewestBlock,
-    LargestReceivedTimeDelta = now_us() - LargestReceivedTimestamp,
+    LargestReceivedTimeDelta = quic_util:now_us() - LargestReceivedTimestamp,
 
     FirstAckReceivedPacketBlock =
         #ack_received_packet_block{
@@ -135,7 +131,7 @@ put_in_inbound_blocks(PacketNumber, [H | T], [] = _RevAcc)
     % contiguous packet
     ChangedH =
         H#inbound_packet_block{ largest_packet_number = PacketNumber,
-                                largest_packet_number_timestamp = now_us() },
+                                largest_packet_number_timestamp = quic_util:now_us() },
     {contiguous, [ChangedH | T]};
 put_in_inbound_blocks(PacketNumber, [H | _] = L, [] = _RevAcc)
   when PacketNumber > (H#inbound_packet_block.largest_packet_number + 1) ->
@@ -143,7 +139,7 @@ put_in_inbound_blocks(PacketNumber, [H | _] = L, [] = _RevAcc)
     NewH =
         #inbound_packet_block{ smallest_packet_number = PacketNumber,
                                largest_packet_number = PacketNumber,
-                               largest_packet_number_timestamp = now_us() },
+                               largest_packet_number_timestamp = quic_util:now_us() },
     {premature, [NewH | L]};
 put_in_inbound_blocks(PacketNumber, [H | _], _RevAcc)
   when PacketNumber >= H#inbound_packet_block.smallest_packet_number,
@@ -157,7 +153,7 @@ put_in_inbound_blocks(PacketNumber, [H | _] = L, [PrevH | _] = RevAcc)
     NewH =
         #inbound_packet_block{ smallest_packet_number = PacketNumber,
                                largest_packet_number = PacketNumber,
-                               largest_packet_number_timestamp = now_us() },
+                               largest_packet_number_timestamp = quic_util:now_us() },
     {delayed, lists:reverse(RevAcc) ++ [NewH | L]};
 put_in_inbound_blocks(PacketNumber, [H | T], RevAcc)
   when PacketNumber < H#inbound_packet_block.smallest_packet_number ->
@@ -168,5 +164,5 @@ put_in_inbound_blocks(PacketNumber, [], RevAcc) ->
     NewH =
         #inbound_packet_block{ smallest_packet_number = PacketNumber,
                                largest_packet_number = PacketNumber,
-                               largest_packet_number_timestamp = now_us() },
+                               largest_packet_number_timestamp = quic_util:now_us() },
     {delayed, lists:reverse([NewH | RevAcc])}.

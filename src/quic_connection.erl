@@ -44,10 +44,9 @@
           remote_sni :: iodata(),
           socket :: inet:socket(),
 
-          connection_id :: uint64(),
-          outbound_packet_number :: uint64(),
-          %crypto_state :: quic_crypto:state(),
           inflow_state :: quic_inflow:state(),
+          outflow_state :: quic_outflow:state(),
+
           crypto_stream :: quic_stream:state(),
           regular_streams :: #{stream_id() => quic_stream:state()}
          }).
@@ -59,17 +58,20 @@
 
 -type stream_reaction() :: ({change_state, NewState :: term()} |
                             {send, Data :: iodata()} |
-                            {send, Data :: iodata(), OptionalHeaders :: [optional_header()]}).
+                            {send, Data :: iodata(), OptionalHeaders :: [optional_packet_header()]}).
 -export_type([stream_reaction/0]).
 
 -type inflow_reaction() :: ({change_state, NewState :: quic_inflow:state()} |
-                            {send, Frame :: frame()} |
+                            {send_frame, Frame :: frame()} |
                             {handle_received_packet, quic_packet()}).
 -export_type([inflow_reaction/0]).
 
--type optional_header() :: ({version, iodata()} |               % 4 bytes
-                            {diversification_nonce, iodata()}). % 32 bytes
--export_type([optional_header/0]).
+-type outflow_reaction() :: ({change_state, NewState :: quic_inflow:state()} |
+                             {send_packet, Packet :: iodata()}).
+-export_type([outflow_reaction/0]).
+
+-type optional_packet_header() :: outflow:optional_packet_header().
+-export_type([optional_packet_header/0]).
 
 %% ------------------------------------------------------------------
 %% API Function Definitions
@@ -138,7 +140,8 @@ send_packet(QuicPacket, State) ->
             socket = Socket } = State,
 
     {Data, NewCryptoState} = quic_packet:encode(QuicPacket, client, crypto_state(State)),
-    %lager:debug("sending packet (encoded size ~p): ~p", [iolist_size(Data), QuicPacket]),
+    lager:debug("sending packet with number ~p (encoded size ~p)",
+                [quic_packet:packet_number(QuicPacket), iolist_size(Data)]),
     ok = gen_udp:send(Socket, RemoteHostname, RemotePort, Data),
     set_crypto_state(State, NewCryptoState).
 
@@ -147,20 +150,14 @@ send_packet(QuicPacket, State) ->
 send_frame(Frame, State) ->
     send_frame(Frame, State, []).
 
--spec send_frame(stream_frame(), state(),
-                 OptionalHeaders :: [{version_header | diversification_nonce_header, iodata()}])
+-spec send_frame(stream_frame(), state(), [optional_packet_header()])
         -> state().
 send_frame(Frame, State, OptionalHeaders) ->
-    PrevPacketNumber = State#state.outbound_packet_number,
-    NewPacketNumber = PrevPacketNumber + 1,
-    NewState = State#state{ outbound_packet_number = NewPacketNumber },
-    Packet = #regular_packet{
-                connection_id = State#state.connection_id,
-                version = proplists:get_value(version_header, OptionalHeaders),
-                diversification_nonce = proplists:get_value(diversification_nonce_header, OptionalHeaders),
-                packet_number = NewPacketNumber,
-                frames = [Frame]},
-    send_packet(Packet, NewState).
+    OutflowState = State#state.outflow_state,
+    {Reactions, NewOutflowState} =
+        quic_outflow:on_outbound_frame(Frame, OutflowState, OptionalHeaders),
+    NewState = State#state{ outflow_state = NewOutflowState },
+    handle_outflow_reactions(Reactions, NewState).
 
 %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
 -spec send_stream_data(stream_id(), iodata(), state())
@@ -168,7 +165,7 @@ send_frame(Frame, State, OptionalHeaders) ->
 send_stream_data(StreamId, Data, State) ->
     send_stream_data(StreamId, Data, State, []).
 
--spec send_stream_data(stream_id(), iodata(), state(), [optional_header()])
+-spec send_stream_data(stream_id(), iodata(), state(), [optional_packet_header()])
         -> state().
 send_stream_data(StreamId, Data, State, OptionalHeaders) ->
     StreamState = stream_state(StreamId, State),
@@ -181,17 +178,16 @@ send_stream_data(StreamId, Data, State, OptionalHeaders) ->
 
 %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
 -spec setup_connection(state()) -> state().
-setup_connection(#state{ connection_id = undefined,
-                         crypto_stream = undefined,
-                         outbound_packet_number = undefined } = State) ->
+setup_connection(#state{ outflow_state = undefined,
+                         crypto_stream = undefined } = State) ->
         %-> {Reactions :: [quic_connection:stream_reaction()], State :: state()}.
     StreamId = ?CRYPTO_NEGOTIATION_STREAM_ID,
     ConnectionId = crypto:rand_uniform(0, 1 bsl 64),
     InflowState = quic_inflow:initial_state(),
+    OutflowState = quic_outflow:initial_state(ConnectionId),
     {CryptoStreamReactions, CryptoStream} = quic_crypto:on_start(StreamId, ConnectionId),
-    NewState = State#state{ connection_id = ConnectionId,
-                            outbound_packet_number = 0,
-                            inflow_state = InflowState,
+    NewState = State#state{ inflow_state = InflowState,
+                            outflow_state = OutflowState,
                             crypto_stream = CryptoStream },
     handle_stream_reactions(StreamId, CryptoStreamReactions, NewState).
 
@@ -202,7 +198,7 @@ handle_received_data(Data, State) ->
     InflowReactions = quic_inflow:on_receive_packet(Packet, State#state.inflow_state),
     %lager:debug("got packet: ~p", [QuicPacket]),
     NewState = set_crypto_state(State, NewCryptoState),
-    handle_ininflow_reactions(InflowReactions, NewState).
+    handle_inflow_reactions(InflowReactions, NewState).
 
 -spec handle_received_packet(quic_packet(), state()) -> state().
 handle_received_packet(#regular_packet{ packet_number = PacketNumber,
@@ -229,15 +225,17 @@ handle_received_frame(_PacketNumber, Frame, State)
     handle_stream_reactions(StreamId, Reactions, NewState);
 handle_received_frame(_PacketNumber, Frame, State)
   when is_record(Frame, ack_frame) ->
-    % @TODO
-    lager:debug("got ack frame: ~p", [lager:pr(Frame, ?MODULE)]),
-    State;
+    OutflowState = State#state.outflow_state,
+    %lager:debug("got ack frame: ~p", [lager:pr(Frame, ?MODULE)]),
+    {Reactions, NewOutflowState} = quic_outflow:on_inbound_ack_frame(Frame, OutflowState),
+    NewState = State#state{ outflow_state = NewOutflowState },
+    handle_outflow_reactions(Reactions, NewState);
 handle_received_frame(PacketNumber, Frame, State)
   when is_record(Frame, stop_waiting_frame) ->
     lager:debug("got stop_waiting_frame: ~p", [Frame]),
     InflowState = State#state.inflow_state,
     InflowReactions = quic_inflow:on_receive_stop_waiting(PacketNumber, Frame, InflowState),
-    handle_ininflow_reactions(InflowReactions, State);
+    handle_inflow_reactions(InflowReactions, State);
 handle_received_frame(_PacketNumber, Frame, State)
   when is_record(Frame, padding_frame) ->
     % ignore
@@ -262,16 +260,29 @@ handle_stream_reaction(StreamId, {send, Data, OptionalHeaders}, State) ->
     send_stream_data(StreamId, Data, State, OptionalHeaders).
 
 %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
--spec handle_ininflow_reactions([inflow_reaction()], state()) -> state().
-handle_ininflow_reactions(Reactions, State) ->
+-spec handle_inflow_reactions([inflow_reaction()], state()) -> state().
+handle_inflow_reactions(Reactions, State) ->
     lists:foldl(fun handle_inflow_reaction/2, State, Reactions).
 
 -spec handle_inflow_reaction(inflow_reaction(), state()) -> state().
 handle_inflow_reaction({change_state, NewInflowState}, State) ->
     State#state{ inflow_state = NewInflowState };
-handle_inflow_reaction({send, Frame}, State) ->
+handle_inflow_reaction({send_frame, Frame}, State) ->
     send_frame(Frame, State);
 handle_inflow_reaction({handle_received_packet, Packet}, State) ->
+    handle_received_packet(Packet, State).
+
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+-spec handle_outflow_reactions([outflow_reaction()], state()) -> state().
+handle_outflow_reactions(Reactions, State) ->
+    lists:foldl(fun handle_outflow_reaction/2, State, Reactions).
+
+-spec handle_outflow_reaction(outflow_reaction(), state()) -> state().
+handle_outflow_reaction({change_state, NewOutflowState}, State) ->
+    State#state{ outflow_state = NewOutflowState };
+handle_outflow_reaction({send_packet, Packet}, State) ->
+    send_packet(Packet, State);
+handle_outflow_reaction({handle_received_packet, Packet}, State) ->
     handle_received_packet(Packet, State).
 
 %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
