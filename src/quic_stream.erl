@@ -111,8 +111,14 @@ new_instream(data_kv) ->
 
 insert_into_instream(Offset, Data, State) ->
     Instream = State#state.instream,
-    {ok, NewInstream} = quic_instream:insert(Instream, Offset, Data),
-    State#state{ instream = NewInstream }.
+    case quic_instream:insert(Instream, Offset, Data) of
+        {ok, NewInstream} ->
+            State#state{ instream = NewInstream };
+        {error, stale_data} ->
+            lager:debug("got outdated data for stream ~p, offset ~p, with length ~p",
+                        [State#state.stream_id, Offset, iolist_size(Data)]),
+            State
+    end.
 
 consume_instream_value(State) ->
     Instream = State#state.instream,
