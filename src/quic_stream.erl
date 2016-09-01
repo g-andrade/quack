@@ -9,9 +9,9 @@
 %% ------------------------------------------------------------------
 
 -export([start_link/4]). -ignore_xref({start_link, 4}).
--export([send/2]).
--export([send/3]).
--export([recv/3]).
+-export([dispatch_inbound_frame/2]).
+-export([dispatch_outbound_value/2]).
+-export([dispatch_outbound_value/3]).
 
 %% ------------------------------------------------------------------
 %% gen_server Function Exports
@@ -53,13 +53,7 @@
 -type data_packing() :: raw | data_kv.
 -export_type([data_packing/0]).
 
--type reaction() :: ({change_state, NewState :: term()} |
-                     {send, Value :: outbound_value()} |
-                     {send, Value :: outbound_value(),
-                      OptionalPacketHeaders :: [quic_connection:optional_packet_header()]}).
--export_type([reaction/0]).
-
--type outbound_value() :: iodata() | data_kv() | {pre_encoded, iodata()}.
+-type outbound_value() :: iodata() | data_kv() | {raw, iodata()}.
 
 
 %% ------------------------------------------------------------------
@@ -72,18 +66,19 @@ start_link(StreamId, OutflowPid, HandlerModule, HandlerPid) ->
                            HandlerModule, HandlerPid],
                           []).
 
--spec send(Pid :: pid(), OutboundValue :: outbound_value()) -> ok.
-send(Pid, OutboundValue) ->
-    send(Pid, OutboundValue, []).
+-spec dispatch_inbound_frame(Pid :: pid(), Frame :: stream_frame() | stream_fin_frame()) -> ok.
+dispatch_inbound_frame(Pid, Frame) ->
+    gen_server:cast(Pid, {inbound_frame, Frame}).
 
--spec send(Pid :: pid(), OutboundValue :: outbound_value(),
-           OptionalPacketHeaders :: [quic_connection:optional_packet_header()]) -> ok.
-send(Pid, OutboundValue, OptionalPacketHeaders) ->
-    gen_server:cast(Pid, {send, OutboundValue, OptionalPacketHeaders}).
+-spec dispatch_outbound_value(Pid :: pid(), OutboundValue :: outbound_value()) -> ok.
+dispatch_outbound_value(Pid, OutboundValue) ->
+    dispatch_outbound_value(Pid, OutboundValue, []).
 
--spec recv(Pid :: pid(), Offset :: non_neg_integer(), Data :: iodata()) -> ok.
-recv(Pid, Offset, Data) ->
-    gen_server:cast(Pid, {recv, Offset, Data}).
+-spec dispatch_outbound_value(
+        Pid :: pid(), OutboundValue :: outbound_value(),
+        OptionalPacketHeaders :: [quic_outflow:optional_packet_header()]) -> ok.
+dispatch_outbound_value(Pid, OutboundValue, OptionalPacketHeaders) ->
+    gen_server:cast(Pid, {outbound_value, OutboundValue, OptionalPacketHeaders}).
 
 %% ------------------------------------------------------------------
 %% gen_server Function Definitions
@@ -108,7 +103,15 @@ handle_call(Request, From, State) ->
                 [Request, From, State]),
     {noreply, State}.
 
-handle_cast({send, OutboundValue, OptionalPacketHeaders}, State) ->
+handle_cast({inbound_frame, #stream_frame{} = Frame}, State) ->
+    #stream_frame{ offset = Offset,
+                   data_payload = Data } = Frame,
+    StateB = insert_into_instream(Offset, Data, State),
+    {ConsumedValue, StateC} = consume_instream_value(StateB),
+    (is_consumed_value_empty(ConsumedValue, StateC#state.data_packing)
+     orelse handle_consumed_value(ConsumedValue, StateC)),
+    {noreply, StateC};
+handle_cast({outbound_value, OutboundValue, OptionalPacketHeaders}, State) ->
     Data = pack_outbound_value(OutboundValue, State#state.data_packing),
     DataSize = iolist_size(Data),
     Offset = State#state.outstream_offset,
@@ -119,17 +122,8 @@ handle_cast({send, OutboundValue, OptionalPacketHeaders}, State) ->
                stream_id = StreamId,
                offset = Offset,
                data_payload = Data },
-    quic_outflow:send_frame(State#state.outflow_pid, Frame, OptionalPacketHeaders),
-    {noreply, NewState};
-handle_cast({recv, Offset, Data}, State) ->
-    StateB = insert_into_instream(Offset, Data, State),
-    {ConsumedValue, StateC} = consume_instream_value(StateB),
-    (is_consumed_value_empty(ConsumedValue, StateC#state.data_packing)
-     orelse handle_consumed_value(ConsumedValue, StateC)),
-    {noreply, StateC};
-handle_cast(Msg, State) ->
-    lager:debug("unhandled cast ~p on state ~p", [Msg, State]),
-    {noreply, State}.
+    quic_outflow:dispatch_frame(State#state.outflow_pid, Frame, OptionalPacketHeaders),
+    {noreply, NewState}.
 
 handle_info(Info, State) ->
     lager:debug("unhandled info ~p on state ~p", [Info, State]),
@@ -183,5 +177,5 @@ pack_outbound_value(Data, raw) when is_list(Data); is_binary(Data) ->
     Data;
 pack_outbound_value(#data_kv{} = DataKv, data_kv) ->
     quic_data_kv:encode(DataKv);
-pack_outbound_value({pre_encoded, Data}, data_kv) when is_list(Data); is_binary(Data) ->
+pack_outbound_value({raw, Data}, data_kv) when is_list(Data); is_binary(Data) ->
     Data.

@@ -228,7 +228,6 @@ init([ConnectionId]) ->
            }}.
 
 handle_call({subscribe_shadow_state, SubscriberModule, SubscriberPid}, _From, State) ->
-    link(SubscriberPid), % @todo actually monitor and be graceful
     #state{ crypto = Crypto,
             shadow_subscribers = Subscribers } = State,
 
@@ -248,7 +247,6 @@ handle_call(Request, From, State) ->
     {noreply, State}.
 
 handle_cast({start, StreamPid}, #state{ crypto = (#unstarted{} = Crypto) } = State) ->
-    link(StreamPid),
     ConnectionId = Crypto#unstarted.connection_id,
     NewCrypto = #plain_encryption{ connection_id = ConnectionId },
     NewState =
@@ -256,7 +254,7 @@ handle_cast({start, StreamPid}, #state{ crypto = (#unstarted{} = Crypto) } = Sta
           crypto = NewCrypto,
           stream_pid = StreamPid },
     InchoateDataKv = inchoate_data_kv(),
-    quic_stream:send(StreamPid, InchoateDataKv, [{version, ?QUIC_VERSION}]),
+    quic_stream:dispatch_outbound_value(StreamPid, InchoateDataKv, [{version, ?QUIC_VERSION}]),
     maybe_notify_subscribers(Crypto, NewCrypto, State#state.shadow_subscribers),
     {noreply, NewState};
 handle_cast({inbound, DataKv}, #state{ crypto = (#plain_encryption{} = Crypto) } = State)
@@ -553,7 +551,7 @@ on_server_rej(ServerRej, StreamPid, PlainEncryption) ->
            encoded_server_cfg = ServerRej#server_rej.encoded_server_cfg,
            encoded_leaf_certificate = EncodedLeafCertificate },
 
-    quic_stream:send(StreamPid, {pre_encoded, EncodedChloDataKv}),
+    quic_stream:dispatch_outbound_value(StreamPid, {raw, EncodedChloDataKv}),
     initial_encryption(ConnectionId, PickedAeadAlgorithm, InitialEncryptionParams).
 
 -spec decode_server_rej(data_kv()) -> server_rej().

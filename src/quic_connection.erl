@@ -12,7 +12,7 @@
 %% API Function Exports
 %% ------------------------------------------------------------------
 
--export([start_link/3]). -ignore_xref({start_link,3}).
+-export([start_link/4]). -ignore_xref({start_link,4}).
 -export([dispatch_packet/2]).
 
 %% ------------------------------------------------------------------
@@ -45,6 +45,7 @@
 %% ------------------------------------------------------------------
 
 -record(state, {
+          component_supervisor_pid :: pid(),
           controlling_pid :: pid(),
           controlling_pid_monitor :: reference(),
           remote_hostname :: inet:hostname(),
@@ -60,18 +61,14 @@
 -type state() :: #state{}.
 
 %% ------------------------------------------------------------------
-%% Type Definitions
-%% ------------------------------------------------------------------
-
--type optional_packet_header() :: outflow:optional_packet_header().
--export_type([optional_packet_header/0]).
-
-%% ------------------------------------------------------------------
 %% API Function Definitions
 %% ------------------------------------------------------------------
 
-start_link(ControllingPid, RemoteHostname, RemotePort) ->
-    gen_server:start_link(?CB_MODULE, [ControllingPid, RemoteHostname, RemotePort], []).
+start_link(ComponentSupervisorPid, ControllingPid, RemoteHostname, RemotePort) ->
+    gen_server:start_link(
+      ?CB_MODULE,
+      [ComponentSupervisorPid, ControllingPid,
+       RemoteHostname, RemotePort], []).
 
 -spec dispatch_packet(pid(), quic_packet()) -> ok.
 dispatch_packet(ConnectionPid, Packet) ->
@@ -89,12 +86,13 @@ notify_new_crypto_shadow(ConnectionPid, CryptoShadowState) ->
 %% gen_server Function Definitions
 %% ------------------------------------------------------------------
 
-init([ControllingPid, RemoteHostname, RemotePort]) ->
+init([ComponentSupervisorPid, ControllingPid, RemoteHostname, RemotePort]) ->
     UdpOpts = [{active, 10},
                {mode, binary}],
     {ok, Socket} = gen_udp:open(0, UdpOpts),
     gen_server:cast(self(), setup_connection),
     {ok, #state{
+            component_supervisor_pid = ComponentSupervisorPid,
             controlling_pid = ControllingPid,
             controlling_pid_monitor = monitor(process, ControllingPid),
             remote_hostname = RemoteHostname,
@@ -157,16 +155,16 @@ send_packet(QuicPacket, State) ->
 -spec setup_connection(state()) -> state().
 setup_connection(#state{ inflow_pid = undefined,
                          outflow_pid = undefined } = State) ->
-        %-> {Reactions :: [quic_connection:stream_reaction()], State :: state()}.
+
+    SupervisorPid = State#state.component_supervisor_pid,
     ConnectionId = crypto:rand_uniform(0, 1 bsl 64),
-    {ok, OutflowPid} = quic_outflow:start_link(self(), ConnectionId),
-    {ok, CryptoPid} = quic_crypto:start_link(ConnectionId),
-    {ok, CryptoShadowState} = quic_crypto:subscribe_shadow_state(CryptoPid, ?MODULE, self()),
-    {ok, CryptoStreamPid} = 
-        quic_stream:start_link(?CRYPTO_STREAM_ID, OutflowPid,
-                               quic_crypto, CryptoPid),
-    {ok, InflowPid} = 
-        quic_inflow:start_link(OutflowPid, #{?CRYPTO_STREAM_ID => CryptoStreamPid}),
+
+    {ok, {InflowPid, OutflowPid, CryptoPid, CryptoShadowState}} =
+        quic_connection_components_sup:start_remaining_components(
+          SupervisorPid, ?MODULE, self(), ConnectionId, ?CRYPTO_STREAM_ID),
+    link(InflowPid),
+    link(OutflowPid),
+    link(CryptoPid),
 
     State#state{ inflow_pid = InflowPid,
                  outflow_pid = OutflowPid,
@@ -178,5 +176,5 @@ handle_received_data(Data, State) ->
     CryptoShadowState = State#state.crypto_shadow_state,
     {Packet, NewCryptoShadowState} = quic_packet:decode(Data, server, CryptoShadowState),
     InflowPid = State#state.inflow_pid,
-    ok = quic_inflow:receive_packet(InflowPid, Packet),
+    ok = quic_inflow:dispatch_packet(InflowPid, Packet),
     State#state{ crypto_shadow_state = NewCryptoShadowState }.

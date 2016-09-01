@@ -9,10 +9,10 @@
 %% ------------------------------------------------------------------
 
 -export([start_link/2]). -ignore_xref({start_link, 2}).
--export([send_frame/2]).
--export([send_frame/3]).
--export([send_packet/2]).
--export([notify_inbound_ack/2]).
+-export([dispatch_frame/2]).
+-export([dispatch_frame/3]).
+-export([dispatch_packet/2]).
+-export([dispatch_inbound_ack/2]).
 
 %% ------------------------------------------------------------------
 %% gen_server Function Exports
@@ -67,22 +67,22 @@
 start_link(ConnectionPid, ConnectionId) ->
     gen_server:start_link(?CB_MODULE, [ConnectionPid, ConnectionId], []).
 
--spec send_frame(OutflowPid :: pid(), Frame :: frame()) -> ok.
-send_frame(OutflowPid, Frame) ->
-    send_frame(OutflowPid, Frame, []).
+-spec dispatch_frame(OutflowPid :: pid(), Frame :: frame()) -> ok.
+dispatch_frame(OutflowPid, Frame) ->
+    dispatch_frame(OutflowPid, Frame, []).
 
--spec send_frame(OutflowPid :: pid(), Frame :: frame(),
+-spec dispatch_frame(OutflowPid :: pid(), Frame :: frame(),
                  OptionalPacketHeaders :: optional_packet_header())
         -> ok.
-send_frame(OutflowPid, Frame, OptionalPacketHeaders) ->
-    gen_server:cast(OutflowPid, {send_frame, Frame, OptionalPacketHeaders}).
+dispatch_frame(OutflowPid, Frame, OptionalPacketHeaders) ->
+    gen_server:cast(OutflowPid, {frame, Frame, OptionalPacketHeaders}).
 
--spec send_packet(OutflowPid :: pid(), Packet :: quic_packet()) -> ok.
-send_packet(OutflowPid, Packet) ->
-    gen_server:cast(OutflowPid, {send_packet, Packet}).
+-spec dispatch_packet(OutflowPid :: pid(), Packet :: quic_packet()) -> ok.
+dispatch_packet(OutflowPid, Packet) ->
+    gen_server:cast(OutflowPid, {packet, Packet}).
 
--spec notify_inbound_ack(OutflowPid :: pid(), AckFrame :: ack_frame()) -> ok.
-notify_inbound_ack(OutflowPid, AckFrame) ->
+-spec dispatch_inbound_ack(OutflowPid :: pid(), AckFrame :: ack_frame()) -> ok.
+dispatch_inbound_ack(OutflowPid, AckFrame) ->
     gen_server:cast(OutflowPid, {inbound_ack, AckFrame}).
 
 %% ------------------------------------------------------------------
@@ -90,7 +90,6 @@ notify_inbound_ack(OutflowPid, AckFrame) ->
 %% ------------------------------------------------------------------
 
 init([ConnectionPid, ConnectionId]) ->
-    link(ConnectionPid),
     InitialState =
         #state{
            connection_pid = ConnectionPid,
@@ -104,7 +103,7 @@ handle_call(Request, From, State) ->
                 [Request, From, State]),
     {noreply, State}.
 
-handle_cast({send_frame, Frame, OptionalPacketHeaders}, State) ->
+handle_cast({frame, Frame, OptionalPacketHeaders}, State) ->
     #state{ connection_id = ConnectionId } = State,
     Packet =
         #regular_packet{
@@ -113,7 +112,7 @@ handle_cast({send_frame, Frame, OptionalPacketHeaders}, State) ->
            diversification_nonce = proplists:get_value(diversification_nonce, OptionalPacketHeaders),
            frames = [Frame] },
     {noreply, on_outbound_packet(Packet, State)};
-handle_cast({send_packet, Packet}, State) ->
+handle_cast({packet, Packet}, State) ->
     {noreply, on_outbound_packet(Packet, State)};
 handle_cast({inbound_ack, AckFrame}, State) ->
     {noreply, handle_inbound_ack(AckFrame, State)};
@@ -236,9 +235,9 @@ resend_all_below_largest_received(LargestReceivedPacketNumber, State) ->
     NewState = State#state{ unacked_packets = NewUnackedPackets },
 
     (UnackedPacketsToResend =/= []
-     andalso 
+     andalso
      begin
-         [#unacked_packet{ packet_number = HighestResendingPacketNumber } | _] = 
+         [#unacked_packet{ packet_number = HighestResendingPacketNumber } | _] =
             UnackedPacketsToResend,
          debug_unacked_packet_numbers("resending packets ", UnackedPacketsToResend),
          StopWaitingPacketNumber = HighestResendingPacketNumber + 1,
@@ -253,11 +252,11 @@ resend_all_below_largest_received(LargestReceivedPacketNumber, State) ->
          StopWaitingFrame =
             #stop_waiting_frame{
                least_unacked_packet_number = StopWaitingPacketNumber },
-         send_frame(self(), StopWaitingFrame),
+         dispatch_frame(self(), StopWaitingFrame),
 
          lists:foreach(
            fun (Packet) ->
-                   send_packet(self(), Packet)
+                   dispatch_packet(self(), Packet)
            end,
            PacketsToResend)
      end),

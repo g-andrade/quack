@@ -8,7 +8,7 @@
 %% ------------------------------------------------------------------
 
 -export([start_link/2]). -ignore_xref({start_link,2}).
--export([receive_packet/2]).
+-export([dispatch_packet/2]).
 
 %% ------------------------------------------------------------------
 %% gen_server Function Exports
@@ -55,9 +55,9 @@
 start_link(OutflowPid, InitialStreams) ->
     gen_server:start_link(?CB_MODULE, [OutflowPid, InitialStreams], []).
 
--spec receive_packet(InflowPid :: pid(), quic_packet()) -> ok.
-receive_packet(InflowPid, Packet) ->
-    gen_server:cast(InflowPid, {receive_packet, Packet}).
+-spec dispatch_packet(InflowPid :: pid(), quic_packet()) -> ok.
+dispatch_packet(InflowPid, Packet) ->
+    gen_server:cast(InflowPid, {packet, Packet}).
 
 %% ------------------------------------------------------------------
 %% gen_server Function Definitions
@@ -77,8 +77,8 @@ handle_call(Request, From, State) ->
                 [Request, From, State]),
     {noreply, State}.
 
-handle_cast({receive_packet, Packet}, State) ->
-    NewState = on_receive_packet(Packet, State),
+handle_cast({packet, Packet}, State) ->
+    NewState = on_inbound_packet(Packet, State),
     {noreply, NewState};
 handle_cast(Msg, State) ->
     lager:debug("unhandled cast ~p on state ~p", [Msg, State]),
@@ -98,8 +98,8 @@ code_change(_OldVsn, State, _Extra) ->
 %% Internal Function Definitions
 %% ------------------------------------------------------------------
 
--spec on_receive_packet(regular_packet(), state()) -> state().
-on_receive_packet(#regular_packet{ packet_number = PacketNumber } = Packet,
+-spec on_inbound_packet(regular_packet(), state()) -> state().
+on_inbound_packet(#regular_packet{ packet_number = PacketNumber } = Packet,
                   #state{ inbound_packet_blocks = InboundPacketBlocks } = State) ->
     case put_in_inbound_blocks(PacketNumber, InboundPacketBlocks) of
         repeated ->
@@ -111,7 +111,7 @@ on_receive_packet(#regular_packet{ packet_number = PacketNumber } = Packet,
             OutflowPid = State#state.outflow_pid,
             NewState = State#state{ inbound_packet_blocks = NewInboundPacketBlocks },
             AckFrame = generate_ack_frame(NewState#state.inbound_packet_blocks),
-            quic_outflow:send_frame(OutflowPid, AckFrame),
+            quic_outflow:dispatch_frame(OutflowPid, AckFrame),
             handle_received_packet(Packet, NewState)
     end.
 
@@ -127,28 +127,25 @@ handle_received_packet(#regular_packet{ frames = Frames }, State) ->
 -spec handle_received_frame(frame(), state()) -> state().
 handle_received_frame(Frame, State)
   when is_record(Frame, stream_frame) ->
-    #stream_frame{ stream_id = StreamId,
-                   offset = Offset,
-                   data_payload = Data } = Frame,
-
+    StreamId = Frame#stream_frame.stream_id,
     StreamPid = maps:get(StreamId, State#state.stream_pids),
-    quic_stream:recv(StreamPid, Offset, Data),
+    quic_stream:dispatch_inbound_frame(StreamPid, Frame),
     State;
 handle_received_frame(Frame, State)
   when is_record(Frame, ack_frame) ->
     OutflowPid = State#state.outflow_pid,
-    quic_outflow:notify_inbound_ack(OutflowPid, Frame),
+    quic_outflow:dispatch_inbound_ack(OutflowPid, Frame),
     State;
 handle_received_frame(Frame, State)
   when is_record(Frame, stop_waiting_frame) ->
     lager:debug("got stop_waiting_frame: ~p", [Frame]),
-    on_receive_stop_waiting(Frame, State);
+    handle_stop_waiting(Frame, State);
 handle_received_frame(Frame, State)
   when is_record(Frame, padding_frame) ->
     % ignore
     State.
 
-on_receive_stop_waiting(StopWaitingFrame, State) ->
+handle_stop_waiting(StopWaitingFrame, State) ->
     StopWaitingPacketNumber = StopWaitingFrame#stop_waiting_frame.least_unacked_packet_number,
     InboundPacketBlocks = State#state.inbound_packet_blocks,
     NewInboundPacketBlocks =
