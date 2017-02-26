@@ -28,6 +28,13 @@
 -define(CB_MODULE, ?MODULE).
 
 %% ------------------------------------------------------------------
+%% Type Definitions
+%% ------------------------------------------------------------------
+
+-type stop_reason() :: {shutdown, {connection_closed, ErrorCode :: binary(), ReasonPhrase :: binary()}}.
+-export_type([stop_reason/0]).
+
+%% ------------------------------------------------------------------
 %% Record Definitions
 %% ------------------------------------------------------------------
 
@@ -82,8 +89,7 @@ handle_call(Request, From, State) ->
     {noreply, State}.
 
 handle_cast({packet, Packet}, State) ->
-    NewState = on_inbound_packet(Packet, State),
-    {noreply, NewState};
+    on_inbound_packet(Packet, State);
 handle_cast(Msg, State) ->
     lager:debug("unhandled cast ~p on state ~p", [Msg, State]),
     {noreply, State}.
@@ -131,13 +137,14 @@ register_streams(Streams, State) ->
       streams = FinalStreams,
       stream_monitors = FinalStreamMonitors }.
 
--spec on_inbound_packet(inbound_regular_packet(), state()) -> state().
+-spec on_inbound_packet(inbound_regular_packet(), state())
+        -> {noreply, state()} | {stop, stop_reason(), state()}.
 on_inbound_packet(#inbound_regular_packet{ packet_number = PacketNumber } = Packet,
                   #state{ inbound_packet_blocks = InboundPacketBlocks } = State) ->
     case put_in_inbound_blocks(PacketNumber, InboundPacketBlocks) of
         repeated ->
             lager:debug("ignoring repeated packet with number ~p", [PacketNumber]),
-            State;
+            {noreply, State};
         {OrderCategory, NewInboundPacketBlocks} ->
             lager:debug("accepting packet with number ~p (~p)",
                         [PacketNumber, OrderCategory]),
@@ -148,27 +155,34 @@ on_inbound_packet(#inbound_regular_packet{ packet_number = PacketNumber } = Pack
             handle_received_packet(Packet, NewState)
     end.
 
--spec handle_received_packet(quic_packet(), state()) -> state().
+-spec handle_received_packet(quic_packet(), state())
+        -> {noreply, state()} | {stop, stop_reason(), state()}.
 handle_received_packet(#inbound_regular_packet{ frames = Frames }, State) ->
-    lists:foldl(
-      fun (Frame, StateAcc) ->
-              handle_received_frame(Frame, StateAcc)
-      end,
-      State,
-      Frames).
+    handle_received_frames(Frames, State).
 
--spec handle_received_frame(frame(), state()) -> state().
+-spec handle_received_frames([frame()], state())
+        -> {noreply, state()} | {stop, stop_reason(), state()}.
+handle_received_frames([], State) ->
+    {noreply, State};
+handle_received_frames([Frame | NextFrames], State) ->
+    case handle_received_frame(Frame, State) of
+        {noreply, NewState} -> handle_received_frames(NextFrames, NewState);
+        {stop, Reason, NewState} -> {stop, Reason, NewState}
+    end.
+
+-spec handle_received_frame(frame(), state())
+        -> {noreply, state()} | {stop, stop_reason(), state()}.
 handle_received_frame(Frame, State)
   when is_record(Frame, stream_frame) ->
     StreamId = Frame#stream_frame.stream_id,
     StreamPid = maps:get(StreamId, State#state.streams),
     quic_stream:dispatch_inbound_frame(StreamPid, Frame),
-    State;
+    {noreply, State};
 handle_received_frame(Frame, State)
   when is_record(Frame, ack_frame) ->
     OutflowPid = State#state.outflow_pid,
     quic_outflow:dispatch_inbound_ack(OutflowPid, Frame),
-    State;
+    {noreply, State};
 handle_received_frame(Frame, State)
   when is_record(Frame, stop_waiting_frame) ->
     lager:debug("got stop_waiting_frame: ~p", [Frame]),
@@ -176,7 +190,13 @@ handle_received_frame(Frame, State)
 handle_received_frame(Frame, State)
   when is_record(Frame, padding_frame) ->
     % ignore
-    State.
+    {noreply, State};
+handle_received_frame(Frame, State)
+  when is_record(Frame, connection_close_frame) ->
+    #connection_close_frame{
+       error_code = ErrorCode,
+       reason_phrase = ReasonPhrase } = Frame,
+    {stop, {shutdown, {connection_closed, ErrorCode, ReasonPhrase}}, State}.
 
 handle_stop_waiting(StopWaitingFrame, State) ->
     StopWaitingPacketNumber = StopWaitingFrame#stop_waiting_frame.least_unacked_packet_number,
@@ -187,7 +207,7 @@ handle_stop_waiting(StopWaitingFrame, State) ->
                   LargestPacketNumber < StopWaitingPacketNumber
           end,
           InboundPacketBlocks),
-    State#state{ inbound_packet_blocks = NewInboundPacketBlocks }.
+    {noreply, State#state{ inbound_packet_blocks = NewInboundPacketBlocks }}.
 
 generate_ack_frame([NewestBlock | _] = InboundPacketBlocks) ->
     [OldestBlock | RemainingBlocks] =lists:reverse(InboundPacketBlocks),

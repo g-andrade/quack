@@ -121,10 +121,19 @@ handle_info({udp, Socket, _SenderIp, _SenderPort, Data}, #state{ socket = Socket
 handle_info({'DOWN', Reference, process, _Pid, _Reason}, State)
   when Reference =:= State#state.controlling_pid_monitor ->
     {stop, oops, State};
+handle_info({'DOWN', Reference, process, _Pid, Reason}, State)
+  when Reference =:= State#state.inflow_monitor  ->
+    {stop, {shutdown, Reason}, State};
+handle_info({'DOWN', Reference, process, _Pid, Reason}, State)
+  when Reference =:= State#state.outflow_monitor  ->
+    {stop, {shutdown, Reason}, State};
 handle_info(Info, State) ->
     lager:debug("unhandled info ~p on state ~p", [Info, State]),
     {noreply, State}.
 
+terminate({shutdown, Reason}, _State) ->
+    lager:debug("shutting down: ~p", [Reason]),
+    ok;
 terminate(_Reason, _State) ->
     ok.
 
