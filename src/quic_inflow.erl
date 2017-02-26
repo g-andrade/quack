@@ -1,5 +1,6 @@
 -module(quic_inflow).
 
+-include("quic.hrl").
 -include("quic_frame.hrl").
 -include("quic_packet.hrl").
 
@@ -31,7 +32,11 @@
 %% Type Definitions
 %% ------------------------------------------------------------------
 
--type stop_reason() :: {shutdown, {connection_closed, ErrorCode :: binary(), ReasonPhrase :: binary()}}.
+-type shutdown_reason() :: ({connection_closed, ErrorCode :: binary(), ReasonPhrase :: binary()} |
+                            {incompatible_remote_versions, [binary(), ...]}).
+-export_type([shutdown_reason/0]).
+
+-type stop_reason() :: {shutdown, shutdown_reason()}.
 -export_type([stop_reason/0]).
 
 %% ------------------------------------------------------------------
@@ -137,8 +142,13 @@ register_streams(Streams, State) ->
       streams = FinalStreams,
       stream_monitors = FinalStreamMonitors }.
 
--spec on_inbound_packet(inbound_regular_packet(), state())
+-spec on_inbound_packet(version_negotiation_packet() | inbound_regular_packet(), state())
         -> {noreply, state()} | {stop, stop_reason(), state()}.
+on_inbound_packet(#version_negotiation_packet{ supported_versions = SupportedVersions }, State) ->
+    case lists:member(?QUIC_VERSION, SupportedVersions) of
+        true -> {noreply, State};
+        false -> {stop, {shutdown, {incompatible_remote_versions, SupportedVersions}}, State}
+    end;
 on_inbound_packet(#inbound_regular_packet{ packet_number = PacketNumber } = Packet,
                   #state{ inbound_packet_blocks = InboundPacketBlocks } = State) ->
     case put_in_inbound_blocks(PacketNumber, InboundPacketBlocks) of
