@@ -25,16 +25,29 @@
          }).
 -type version_negotiation_packet() :: #version_negotiation_packet{}.
 
--record(regular_packet, {
+-record(inbound_regular_packet, {
           connection_id :: connection_id(),   % optional
           version :: binary(),                % optional
           diversification_nonce :: binary(),  % optional
           packet_number :: packet_number(),   % optional
           frames :: [frame()]                 % optional
          }).
--type regular_packet() :: #regular_packet{}.
+-type inbound_regular_packet() :: #inbound_regular_packet{}.
 
--type quic_packet() :: public_reset_packet() | version_negotiation_packet() | regular_packet().
+-record(outbound_regular_packet, {
+          connection_id :: connection_id(),   % optional
+          version :: binary(),                % optional
+          diversification_nonce :: binary(),  % optional
+          packet_number :: packet_number(),   % optional
+          frames :: [frame()],                % optional
+          crypto_state :: current | quic_crypto:state() % optional
+         }).
+-type outbound_regular_packet() :: #outbound_regular_packet{}.
+
+-type quic_packet() :: (public_reset_packet() |
+                        version_negotiation_packet() |
+                        inbound_regular_packet() |
+                        outbound_regular_packet()).
 
 -type connection_id() :: uint64().
 -type packet_number() :: uint48().

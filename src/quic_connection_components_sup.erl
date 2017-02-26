@@ -7,7 +7,7 @@
 
 -export([start_link/1]).
 -export([get_connection_pid/1]).
--export([start_remaining_components/5]).
+-export([start_remaining_components/6]).
 
 %% ------------------------------------------------------------------
 %% supervisor Function Exports
@@ -33,17 +33,10 @@ get_connection_pid(SupervisorPid) ->
     {_Id, Pid, _Type, _Modules} = lists:keyfind(quic_connection, 1, AllChildren),
     Pid.
 
-start_remaining_components(SupervisorPid, ConnectionModule,
-                           ConnectionPid, ConnectionId, CryptoStreamId) ->
+start_remaining_components(SupervisorPid, ConnectionPid, ConnectionId, CryptoStreamId,
+                           CryptoModule, CryptoPid) ->
     OutflowChild = ?CHILD(quic_outflow, worker, [ConnectionPid, ConnectionId]),
     {ok, OutflowPid} = supervisor:start_child(SupervisorPid, OutflowChild),
-
-    CryptoModule = quic_crypto,
-    CryptoChild = ?CHILD(CryptoModule, worker, [ConnectionId]),
-    {ok, CryptoPid} = supervisor:start_child(SupervisorPid, CryptoChild),
-    {ok, CryptoShadowState} =
-        CryptoModule:subscribe_shadow_state(CryptoPid, ConnectionModule,
-                                           ConnectionPid),
 
     CryptoStreamChild = ?CHILD(quic_stream, worker, [CryptoStreamId, OutflowPid,
                                                      CryptoModule, CryptoPid]),
@@ -53,7 +46,7 @@ start_remaining_components(SupervisorPid, ConnectionModule,
     InflowChild = ?CHILD(quic_inflow, worker, [OutflowPid, InflowInitialStreams]),
     {ok, InflowPid} = supervisor:start_child(SupervisorPid, InflowChild),
 
-    {ok, {InflowPid, OutflowPid, CryptoPid, CryptoShadowState}}.
+    {ok, {InflowPid, OutflowPid}}.
 
 %% ------------------------------------------------------------------
 %% supervisor Function Definitions

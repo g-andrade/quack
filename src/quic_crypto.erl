@@ -1,6 +1,4 @@
 -module(quic_crypto).
--behaviour(gen_server).
--behaviour(quic_stream_handler).
 
 -include("quic.hrl").
 %-include("quic_crypto.hrl").
@@ -13,30 +11,13 @@
 %% API Function Exports
 %% ------------------------------------------------------------------
 
--export([start_link/1]).
--export([subscribe_shadow_state/3]).
--export([on_diversification_nonce/2]).
+-export([initial_state/1]).
+-export([start_stream/2]).
+-export([handle_stream_inbound/2]).
+-export([maybe_diversify/2]).
 -export([decrypt_packet_payload/4]).
 -export([encrypt_packet_payload/4]).
 -export([packet_encryption_overhead/1]).
-
-%% ------------------------------------------------------------------
-%% gen_server Function Exports
-%% ------------------------------------------------------------------
-
--export([init/1,
-         handle_call/3,
-         handle_cast/2,
-         handle_info/2,
-         terminate/2,
-         code_change/3]).
-
-%% ------------------------------------------------------------------
-%% quic_stream_handler Function Exports
-%% ------------------------------------------------------------------
-
--export([start_stream/2]).
--export([handle_inbound/2]).
 
 %% ------------------------------------------------------------------
 %% Macro Definitions
@@ -52,19 +33,8 @@
 %% Record Definitions
 %% ------------------------------------------------------------------
 
--record(state, {
-          crypto :: crypto_state(),
-          stream_pid :: pid(),
-          shadow_subscribers :: [{module(), pid()}]
-         }).
--type state() :: #state{}.
-
--record(shadow, {
-          pid :: pid(),
-          state :: crypto_state()
-         }).
--type shadow_state() :: #shadow{}.
--export_type([shadow_state/0]).
+-type state() :: unstarted() | plain_encryption() | initial_encryption() | forward_secure_encryption().
+-export_type([state/0]).
 
 -record(unstarted, {
           connection_id :: connection_id()
@@ -72,12 +42,14 @@
 -type unstarted() :: #unstarted{}.
 
 -record(plain_encryption, {
-          connection_id :: connection_id()
+          connection_id :: connection_id(),
+          stream_pid :: pid()
          }).
 -type plain_encryption() :: #plain_encryption{}.
 
 -record(initial_encryption, {
           connection_id :: connection_id(),
+          stream_pid :: pid(),
           keys :: keys(),
           aead_algorithm :: known_aead_algorithm(),
           have_encrypted_packets_been_received :: boolean(),
@@ -88,6 +60,7 @@
 
 -record(forward_secure_encryption, {
           connection_id :: connection_id(),
+          stream_pid :: pid(),
           keys :: keys(),
           aead_algorithm :: known_aead_algorithm()
          }).
@@ -171,38 +144,115 @@
 %% API Function Definitions
 %% ------------------------------------------------------------------
 
-start_link(ConnectionId) ->
-    gen_server:start_link(?CB_MODULE, [ConnectionId], []).
+initial_state(ConnectionId) ->
+    #unstarted{ connection_id = ConnectionId }.
 
-subscribe_shadow_state(CryptoPid, SubscriberModule, SubscriberPid) ->
-    gen_server:call(CryptoPid, {subscribe_shadow_state, SubscriberModule, SubscriberPid}).
+start_stream(StreamPid, #unstarted{} = State) ->
+    ConnectionId = State#unstarted.connection_id,
+    InchoateDataKv = inchoate_data_kv(),
+    PacketOptions = [{headers, [{version, ?QUIC_VERSION}]}],
+    quic_stream:dispatch_outbound_value(StreamPid, InchoateDataKv, PacketOptions),
+    #plain_encryption{ connection_id = ConnectionId, stream_pid = StreamPid }.
 
-on_diversification_nonce(DiversificationNonce, Shadow) ->
-    #shadow{ pid = Pid,
-             state = State } = Shadow,
-    NewState = maybe_diversify(DiversificationNonce, Pid, State),
-    Shadow#shadow{ state = NewState }.
+handle_stream_inbound(DataKv, #plain_encryption{} = State)
+  when DataKv#data_kv.tag =:= <<"REJ">> ->
+    lager:debug("processing server rej"),
+    ServerRej = decode_server_rej(DataKv),
+    StreamPid = State#plain_encryption.stream_pid,
+    on_server_rej(ServerRej, StreamPid, State);
+handle_stream_inbound(DataKv, #initial_encryption{} = State)
+  when DataKv#data_kv.tag =:= <<"SHLO">> ->
+    lager:debug("processing server hello"),
+    on_server_hello(DataKv, State).
 
-decrypt_packet_payload(PacketNumber, HeadersData, EncryptedPayload, Shadow) ->
-    #shadow{ pid = CryptoPid,
-             state = State } = Shadow,
-    {Payload, NewState} =
-        decrypt_packet_payload(PacketNumber, HeadersData, EncryptedPayload,
-                               CryptoPid, State),
-    {Payload, Shadow#shadow{ state = NewState }}.
+maybe_diversify(undefined, State) ->
+    State;
+maybe_diversify(_, #initial_encryption{ has_diversified = true } = State) ->
+    State;
+maybe_diversify(_, #forward_secure_encryption{} = State) ->
+    State;
+maybe_diversify(<<DiversificationNonce:32/binary>>, #initial_encryption{} = State) ->
+    Keys = State#initial_encryption.keys,
+    #keys{ server_write_key = ServerWriteKey,
+           server_iv = ServerIv } = Keys,
 
-encrypt_packet_payload(_PacketNumber, HeadersData, Payload, #shadow{ state = State })
+    Secret = [ServerWriteKey, ServerIv],
+    Salt = DiversificationNonce,
+    Info = "QUIC key diversification",
+
+    MaterialLength = (?HKDF_KEY_SIZE + % server key
+                      ?HKDF_IV_SIZE),  % server iv
+
+    Prk = hkdf:extract(sha256, Salt, Secret),
+    Output = hkdf:expand(sha256, Prk, iolist_to_binary(Info), MaterialLength),
+    <<NewServerWriteKey:?HKDF_KEY_SIZE/binary,
+      NewServerIv:?HKDF_IV_SIZE/binary>> = Output,
+
+    NewKeys = Keys#keys{
+                server_write_key = NewServerWriteKey,
+                server_iv = NewServerIv },
+
+    State#initial_encryption{ has_diversified = true,
+                              keys = NewKeys }.
+
+decrypt_packet_payload(_PacketNumber, HeadersData, EncryptedPayload, State)
+  when is_record(State, plain_encryption) ->
+    <<Fnv1Hash:12/binary, Payload/binary>> = EncryptedPayload,
+    ExpectedFnv1Hash = quic_util:hash_fnv1a_96([HeadersData, Payload]),
+    ?ASSERT(Fnv1Hash =:= ExpectedFnv1Hash, invalid_unencrypted_packet),
+    {Payload, State};
+decrypt_packet_payload(PacketNumber, HeadersData, EncryptedPayload, State)
+  when is_record(State, initial_encryption),
+       State#initial_encryption.have_encrypted_packets_been_received ->
+    #initial_encryption{ aead_algorithm = AeadAlgorithm,
+                         keys = Keys } = State,
+    Result = try_decrypt_aead_packet_payload(
+               PacketNumber, HeadersData, EncryptedPayload,
+               AeadAlgorithm, Keys),
+    ?ASSERT(Result =/= error, invalid_initial_encryption_packet),
+    {Result, State};
+decrypt_packet_payload(PacketNumber, HeadersData, EncryptedPayload, State)
+  when is_record(State, initial_encryption) ->
+    ConnectionId = State#initial_encryption.connection_id,
+    PlainEncryption = #plain_encryption{ connection_id = ConnectionId },
+    case catch decrypt_packet_payload(PacketNumber, HeadersData, EncryptedPayload,
+                                      PlainEncryption)
+    of
+        {'EXIT', invalid_unencrypted_packet} ->
+            % let's assume this is the first encrypted packet
+            NewState =
+                State#initial_encryption{
+                  have_encrypted_packets_been_received = true },
+
+            decrypt_packet_payload(
+              PacketNumber, HeadersData,
+              EncryptedPayload, NewState);
+
+        {Payload, _} when is_list(Payload); is_binary(Payload) ->
+            {Payload, State}
+    end;
+decrypt_packet_payload(PacketNumber, HeadersData, EncryptedPayload, State)
+  when is_record(State, forward_secure_encryption) ->
+    #forward_secure_encryption{ aead_algorithm = AeadAlgorithm,
+                                keys = Keys } = State,
+    Result = try_decrypt_aead_packet_payload(
+               PacketNumber, HeadersData, EncryptedPayload,
+               AeadAlgorithm, Keys),
+    ?ASSERT(Result =/= error, invalid_forward_secure_packet),
+    {Result, State}.
+
+encrypt_packet_payload(_PacketNumber, HeadersData, Payload, State)
   when is_record(State, plain_encryption) ->
     Fnv1Hash = quic_util:hash_fnv1a_96([HeadersData, Payload]),
     [Fnv1Hash, Payload];
-encrypt_packet_payload(PacketNumber, HeadersData, Payload, #shadow{ state = State })
+encrypt_packet_payload(PacketNumber, HeadersData, Payload, State)
   when is_record(State, initial_encryption) ->
     #initial_encryption{ aead_algorithm = AeadAlgorithm,
                          keys = Keys } = State,
     encrypt_aead_packet_payload(
       PacketNumber, HeadersData,
       Payload, AeadAlgorithm, Keys);
-encrypt_packet_payload(PacketNumber, HeadersData, Payload, #shadow{ state = State})
+encrypt_packet_payload(PacketNumber, HeadersData, Payload, State)
   when is_record(State, forward_secure_encryption) ->
     #forward_secure_encryption{ aead_algorithm = AeadAlgorithm,
                                 keys = Keys } = State,
@@ -210,92 +260,12 @@ encrypt_packet_payload(PacketNumber, HeadersData, Payload, #shadow{ state = Stat
       PacketNumber, HeadersData,
       Payload, AeadAlgorithm, Keys).
 
-packet_encryption_overhead(#shadow{ state = #plain_encryption{}}) ->
+packet_encryption_overhead(#plain_encryption{}) ->
     12; % 12 bytes for truncated FNV1a-128 hash
-packet_encryption_overhead(#shadow{ state = #initial_encryption{ aead_algorithm = AeadAlgorithm }}) ->
+packet_encryption_overhead(#initial_encryption{ aead_algorithm = AeadAlgorithm }) ->
     aead_encryption_overhead(AeadAlgorithm);
-packet_encryption_overhead(#shadow{ state = #forward_secure_encryption{ aead_algorithm = AeadAlgorithm }}) ->
+packet_encryption_overhead(#forward_secure_encryption{ aead_algorithm = AeadAlgorithm }) ->
     aead_encryption_overhead(AeadAlgorithm).
-
-%% ------------------------------------------------------------------
-%% gen_server Function Definitions
-%% ------------------------------------------------------------------
-
-init([ConnectionId]) ->
-    {ok, #state{
-            crypto = #unstarted{ connection_id = ConnectionId },
-            shadow_subscribers = []
-           }}.
-
-handle_call({subscribe_shadow_state, SubscriberModule, SubscriberPid}, _From, State) ->
-    #state{ crypto = Crypto,
-            shadow_subscribers = Subscribers } = State,
-
-    Shadow = #shadow{ pid = self(), state = Crypto },
-    Reply = {ok, Shadow},
-    NewSubscribers = lists:keystore(SubscriberPid, 2, Subscribers, {SubscriberModule, SubscriberPid}),
-    NewState = State#state{ shadow_subscribers = NewSubscribers },
-    {reply, Reply, NewState};
-handle_call({merge_crypto_state, NewCrypto}, {FromPid, _}, #state{ crypto = Crypto } = State) ->
-    MergedCrypto = merge_crypto_states(Crypto, NewCrypto),
-    NewState = State#state{ crypto = MergedCrypto },
-    maybe_notify_subscribers(Crypto, MergedCrypto, State#state.shadow_subscribers, [FromPid]),
-    {reply, {ok, MergedCrypto}, NewState};
-handle_call(Request, From, State) ->
-    lager:debug("unhandled call ~p from ~p on state ~p",
-                [Request, From, State]),
-    {noreply, State}.
-
-handle_cast({start, StreamPid}, #state{ crypto = (#unstarted{} = Crypto) } = State) ->
-    ConnectionId = Crypto#unstarted.connection_id,
-    NewCrypto = #plain_encryption{ connection_id = ConnectionId },
-    NewState =
-        State#state{
-          crypto = NewCrypto,
-          stream_pid = StreamPid },
-    InchoateDataKv = inchoate_data_kv(),
-    quic_stream:dispatch_outbound_value(StreamPid, InchoateDataKv, [{version, ?QUIC_VERSION}]),
-    maybe_notify_subscribers(Crypto, NewCrypto, State#state.shadow_subscribers),
-    {noreply, NewState};
-handle_cast({inbound, DataKv}, #state{ crypto = (#plain_encryption{} = Crypto) } = State)
-  when DataKv#data_kv.tag =:= <<"REJ">> ->
-    lager:debug("processing server rej"),
-    ServerRej = decode_server_rej(DataKv),
-    StreamPid = State#state.stream_pid,
-    NewCrypto = on_server_rej(ServerRej, StreamPid, Crypto),
-    maybe_notify_subscribers(Crypto, NewCrypto, State#state.shadow_subscribers),
-    {noreply, State#state{ crypto = NewCrypto }};
-handle_cast({inbound, DataKv}, #state{ crypto = (#initial_encryption{} = Crypto) } = State)
-  when DataKv#data_kv.tag =:= <<"SHLO">> ->
-    lager:debug("processing server hello"),
-    NewCrypto = on_server_hello(DataKv, Crypto),
-    maybe_notify_subscribers(Crypto, NewCrypto, State#state.shadow_subscribers),
-    {noreply, State#state{ crypto = NewCrypto }}.
-
-handle_info(Info, State) ->
-    lager:debug("unhandled info ~p on state ~p", [Info, State]),
-    {noreply, State}.
-
-terminate(_Reason, _State) ->
-    ok.
-
-code_change(_OldVsn, State, _Extra) ->
-    {ok, State}.
-
-%% ------------------------------------------------------------------
-%% quic_stream Function Definitions
-%% ------------------------------------------------------------------
-
-start_stream(HandlerPid, StreamPid) ->
-    gen_server:cast(HandlerPid, {start, StreamPid}),
-    {ok, data_kv}.
-
-handle_inbound(HandlerPid, DataKvs) ->
-    lists:foreach(
-      fun (DataKv) ->
-              gen_server:cast(HandlerPid, {inbound, DataKv})
-      end,
-      DataKvs).
 
 %% ------------------------------------------------------------------
 %% Initial encryption
@@ -357,39 +327,6 @@ initial_encryption(ConnectionId, AeadAlgorithm, InitialEncryptionParams) ->
 %% ------------------------------------------------------------------
 %% Key diversification
 %% ------------------------------------------------------------------
-
-maybe_diversify(undefined, _CryptoPid, State) ->
-    State;
-maybe_diversify(_, _CryptoPid, #initial_encryption{ has_diversified = true } = State) ->
-    State;
-maybe_diversify(_, _CryptoPid, #forward_secure_encryption{} = State) ->
-    State;
-maybe_diversify(<<DiversificationNonce:32/binary>>, CryptoPid, #initial_encryption{} = State) ->
-    Keys = State#initial_encryption.keys,
-    #keys{ server_write_key = ServerWriteKey,
-           server_iv = ServerIv } = Keys,
-
-    Secret = [ServerWriteKey, ServerIv],
-    Salt = DiversificationNonce,
-    Info = "QUIC key diversification",
-
-    MaterialLength = (?HKDF_KEY_SIZE + % server key
-                      ?HKDF_IV_SIZE),  % server iv
-
-    Prk = hkdf:extract(sha256, Salt, Secret),
-    Output = hkdf:expand(sha256, Prk, iolist_to_binary(Info), MaterialLength),
-    <<NewServerWriteKey:?HKDF_KEY_SIZE/binary,
-      NewServerIv:?HKDF_IV_SIZE/binary>> = Output,
-
-    NewKeys = Keys#keys{
-                server_write_key = NewServerWriteKey,
-                server_iv = NewServerIv },
-    NewState =
-        State#initial_encryption{ has_diversified = true,
-                                  keys = NewKeys },
-    {ok, MergedState} =
-        gen_server:call(CryptoPid, {merge_crypto_state, NewState}),
-    MergedState.
 
 %% ------------------------------------------------------------------
 %% inchoate
@@ -551,7 +488,8 @@ on_server_rej(ServerRej, StreamPid, PlainEncryption) ->
            encoded_server_cfg = ServerRej#server_rej.encoded_server_cfg,
            encoded_leaf_certificate = EncodedLeafCertificate },
 
-    quic_stream:dispatch_outbound_value(StreamPid, {raw, EncodedChloDataKv}),
+    PacketOptions = [{crypto_state, PlainEncryption}],
+    quic_stream:dispatch_outbound_value(StreamPid, {raw, EncodedChloDataKv}, PacketOptions),
     initial_encryption(ConnectionId, PickedAeadAlgorithm, InitialEncryptionParams).
 
 -spec decode_server_rej(data_kv()) -> server_rej().
@@ -761,91 +699,3 @@ encrypt_aead_packet_payload(PacketNumber, HeadersData, Payload, AeadAlgorithm, K
 
 aead_encryption_overhead(aes_gcm) ->
     ?AES_GCM_TAG_SIZE.
-
-%% ------------------------------------------------------------------
-%% State merging
-%% ------------------------------------------------------------------
-
-merge_crypto_states(#initial_encryption{ have_encrypted_packets_been_received = false,
-                                  keys = Keys },
-             #initial_encryption{ have_encrypted_packets_been_received = true,
-                                  keys = Keys } = NewState) ->
-    NewState;
-merge_crypto_states(#initial_encryption{ has_diversified = false,
-                                  keys = OldKeys },
-             #initial_encryption{ has_diversified = true,
-                                  keys = NewKeys } = NewState) ->
-    false = (OldKeys =:= NewKeys),
-    NewState.
-
-%% ------------------------------------------------------------------
-%% Decryption
-%% ------------------------------------------------------------------
-
-decrypt_packet_payload(_PacketNumber, HeadersData, EncryptedPayload, _CryptoPid, State)
-  when is_record(State, plain_encryption) ->
-    <<Fnv1Hash:12/binary, Payload/binary>> = EncryptedPayload,
-    ExpectedFnv1Hash = quic_util:hash_fnv1a_96([HeadersData, Payload]),
-    ?ASSERT(Fnv1Hash =:= ExpectedFnv1Hash, invalid_unencrypted_packet),
-    {Payload, State};
-decrypt_packet_payload(PacketNumber, HeadersData, EncryptedPayload, _CryptoPid, State)
-  when is_record(State, initial_encryption),
-       State#initial_encryption.have_encrypted_packets_been_received ->
-    #initial_encryption{ aead_algorithm = AeadAlgorithm,
-                         keys = Keys } = State,
-    Result = try_decrypt_aead_packet_payload(
-               PacketNumber, HeadersData, EncryptedPayload,
-               AeadAlgorithm, Keys),
-    ?ASSERT(Result =/= error, invalid_initial_encryption_packet),
-    {Result, State};
-decrypt_packet_payload(PacketNumber, HeadersData, EncryptedPayload, CryptoPid, State)
-  when is_record(State, initial_encryption) ->
-    ConnectionId = State#initial_encryption.connection_id,
-    PlainEncryption = #plain_encryption{ connection_id = ConnectionId },
-    case catch decrypt_packet_payload(PacketNumber, HeadersData, EncryptedPayload,
-                                      CryptoPid, PlainEncryption)
-    of
-        {'EXIT', invalid_unencrypted_packet} ->
-            % let's assume this is the first encrypted packet
-            NewState =
-                State#initial_encryption{
-                  have_encrypted_packets_been_received = true },
-
-            {ok, MergedState} =
-                gen_server:call(CryptoPid, {merge_crypto_state, NewState}),
-
-            decrypt_packet_payload(
-              PacketNumber, HeadersData,
-              EncryptedPayload, CryptoPid, MergedState);
-
-        {Payload, _} when is_list(Payload); is_binary(Payload) ->
-            {Payload, State}
-    end;
-decrypt_packet_payload(PacketNumber, HeadersData, EncryptedPayload, _CryptoPid, State)
-  when is_record(State, forward_secure_encryption) ->
-    #forward_secure_encryption{ aead_algorithm = AeadAlgorithm,
-                                keys = Keys } = State,
-    Result = try_decrypt_aead_packet_payload(
-               PacketNumber, HeadersData, EncryptedPayload,
-               AeadAlgorithm, Keys),
-    ?ASSERT(Result =/= error, invalid_forward_secure_packet),
-    {Result, State}.
-
-%% ------------------------------------------------------------------
-%% Subscriptions
-%% ------------------------------------------------------------------
-
-maybe_notify_subscribers(OldCrypto, NewCrypto, Subscribers) ->
-    maybe_notify_subscribers(OldCrypto, NewCrypto, Subscribers, []).
-
-maybe_notify_subscribers(Crypto, Crypto, _, _) ->
-    ok;
-maybe_notify_subscribers(_OldCrypto, NewCrypto, Subscribers, ExcludedPids) ->
-    Shadow = #shadow{ pid = self(),
-                      state = NewCrypto },
-    lists:foreach(
-      fun ({Module, Pid}) ->
-              lists:member(Pid, ExcludedPids)
-              orelse Module:notify_new_crypto_shadow(Pid, Shadow)
-      end,
-      Subscribers).

@@ -46,6 +46,9 @@
 -type state() :: #state{}.
 -export_type([state/0]).
 
+-type dispatch_option() :: quic_outflow:packet_option().
+-export_type([dispatch_option/0]).
+
 %% ------------------------------------------------------------------
 %% Type Definitions
 %% ------------------------------------------------------------------
@@ -76,9 +79,9 @@ dispatch_outbound_value(Pid, OutboundValue) ->
 
 -spec dispatch_outbound_value(
         Pid :: pid(), OutboundValue :: outbound_value(),
-        OptionalPacketHeaders :: [quic_outflow:optional_packet_header()]) -> ok.
-dispatch_outbound_value(Pid, OutboundValue, OptionalPacketHeaders) ->
-    gen_server:cast(Pid, {outbound_value, OutboundValue, OptionalPacketHeaders}).
+        Options :: [dispatch_option()]) -> ok.
+dispatch_outbound_value(Pid, OutboundValue, Options) ->
+    gen_server:cast(Pid, {outbound_value, OutboundValue, Options}).
 
 %% ------------------------------------------------------------------
 %% gen_server Function Definitions
@@ -111,7 +114,7 @@ handle_cast({inbound_frame, #stream_frame{} = Frame}, State) ->
     (is_consumed_value_empty(ConsumedValue, StateC#state.data_packing)
      orelse handle_consumed_value(ConsumedValue, StateC)),
     {noreply, StateC};
-handle_cast({outbound_value, OutboundValue, OptionalPacketHeaders}, State) ->
+handle_cast({outbound_value, OutboundValue, Options}, State) ->
     Data = pack_outbound_value(OutboundValue, State#state.data_packing),
     DataSize = iolist_size(Data),
     Offset = State#state.outstream_offset,
@@ -122,7 +125,7 @@ handle_cast({outbound_value, OutboundValue, OptionalPacketHeaders}, State) ->
                stream_id = StreamId,
                offset = Offset,
                data_payload = Data },
-    quic_outflow:dispatch_frame(State#state.outflow_pid, Frame, OptionalPacketHeaders),
+    quic_outflow:dispatch_frame(State#state.outflow_pid, Frame, Options),
     {noreply, NewState}.
 
 handle_info(Info, State) ->

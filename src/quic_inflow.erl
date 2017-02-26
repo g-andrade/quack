@@ -98,8 +98,8 @@ code_change(_OldVsn, State, _Extra) ->
 %% Internal Function Definitions
 %% ------------------------------------------------------------------
 
--spec on_inbound_packet(regular_packet(), state()) -> state().
-on_inbound_packet(#regular_packet{ packet_number = PacketNumber } = Packet,
+-spec on_inbound_packet(inbound_regular_packet(), state()) -> state().
+on_inbound_packet(#inbound_regular_packet{ packet_number = PacketNumber } = Packet,
                   #state{ inbound_packet_blocks = InboundPacketBlocks } = State) ->
     case put_in_inbound_blocks(PacketNumber, InboundPacketBlocks) of
         repeated ->
@@ -116,7 +116,7 @@ on_inbound_packet(#regular_packet{ packet_number = PacketNumber } = Packet,
     end.
 
 -spec handle_received_packet(quic_packet(), state()) -> state().
-handle_received_packet(#regular_packet{ frames = Frames }, State) ->
+handle_received_packet(#inbound_regular_packet{ frames = Frames }, State) ->
     lists:foldl(
       fun (Frame, StateAcc) ->
               handle_received_frame(Frame, StateAcc)

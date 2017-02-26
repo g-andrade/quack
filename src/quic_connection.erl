@@ -1,6 +1,6 @@
 -module(quic_connection).
--behaviour(quic_crypto_state_subscriber).
 -behaviour(gen_server).
+-behaviour(quic_stream_handler).
 
 -include("quic.hrl").
 -include("quic_data_kv.hrl").
@@ -16,12 +16,6 @@
 -export([dispatch_packet/2]).
 
 %% ------------------------------------------------------------------
-%% quic_crypto_state_subscriber Function Exports
-%% ------------------------------------------------------------------
-
--export([notify_new_crypto_shadow/2]).
-
-%% ------------------------------------------------------------------
 %% gen_server Function Exports
 %% ------------------------------------------------------------------
 
@@ -31,6 +25,13 @@
          handle_info/2,
          terminate/2,
          code_change/3]).
+
+%% ------------------------------------------------------------------
+%% quic_stream_handler Function Exports (for crypto)
+%% ------------------------------------------------------------------
+
+-export([start_stream/2]).
+-export([handle_inbound/2]).
 
 %% ------------------------------------------------------------------
 %% Macro Definitions
@@ -52,11 +53,9 @@
           remote_port :: inet:port_number(),
           remote_sni :: iodata(),
           socket :: inet:socket(),
-
+          crypto_state :: quic_crypto:state(),
           inflow_pid :: pid(),
-          outflow_pid :: pid(),
-          crypto_pid :: pid(),
-          crypto_shadow_state :: quic_crypto:shadow_state()
+          outflow_pid :: pid()
          }).
 -type state() :: #state{}.
 
@@ -73,14 +72,6 @@ start_link(ComponentSupervisorPid, ControllingPid, RemoteHostname, RemotePort) -
 -spec dispatch_packet(pid(), quic_packet()) -> ok.
 dispatch_packet(ConnectionPid, Packet) ->
     gen_server:cast(ConnectionPid, {dispatch_packet, Packet}).
-
-%% ------------------------------------------------------------------
-%% quic_crypto_state_subscriber Function Definitions
-%% ------------------------------------------------------------------
-
--spec notify_new_crypto_shadow(pid(), quic_crypto:shadow_state()) -> ok.
-notify_new_crypto_shadow(ConnectionPid, CryptoShadowState) ->
-    gen_server:cast(ConnectionPid, {notify_new_crypto_shadow, CryptoShadowState}).
 
 %% ------------------------------------------------------------------
 %% gen_server Function Definitions
@@ -109,9 +100,12 @@ handle_cast(setup_connection, State) ->
 handle_cast({dispatch_packet, QuicPacket}, State) ->
     send_packet(QuicPacket, State),
     {noreply, State};
-handle_cast({notify_new_crypto_shadow, CryptoShadowState}, State) ->
-    NewState = State#state{ crypto_shadow_state = CryptoShadowState },
-    {noreply, NewState};
+handle_cast({start_quic_crypto_stream, StreamPid}, #state{ crypto_state = CryptoState } = State) ->
+    NewCryptoState = quic_crypto:start_stream(StreamPid, CryptoState),
+    {noreply, State#state{ crypto_state = NewCryptoState }};
+handle_cast({crypto_stream_inbound, DataKv}, #state{ crypto_state = CryptoState } = State) ->
+    NewCryptoState = quic_crypto:handle_stream_inbound(DataKv, CryptoState),
+    {noreply, State#state{ crypto_state = NewCryptoState }};
 handle_cast(Msg, State) ->
     lager:debug("unhandled cast ~p on state ~p", [Msg, State]),
     {noreply, State}.
@@ -136,6 +130,21 @@ code_change(_OldVsn, State, _Extra) ->
     {ok, State}.
 
 %% ------------------------------------------------------------------
+%% quic_stream Function Definitions (for crypto)
+%% ------------------------------------------------------------------
+
+start_stream(HandlerPid, StreamPid) ->
+    gen_server:cast(HandlerPid, {start_quic_crypto_stream, StreamPid}),
+    {ok, data_kv}.
+
+handle_inbound(HandlerPid, DataKvs) ->
+    lists:foreach(
+      fun (DataKv) ->
+              gen_server:cast(HandlerPid, {crypto_stream_inbound, DataKv})
+      end,
+      DataKvs).
+
+%% ------------------------------------------------------------------
 %% Internal Function Definitions
 %% ------------------------------------------------------------------
 
@@ -146,35 +155,45 @@ send_packet(QuicPacket, State) ->
             remote_port = RemotePort,
             socket = Socket } = State,
 
-    Data = quic_packet:encode(QuicPacket, client, State#state.crypto_shadow_state),
+    CryptoState = outbound_packet_crypto_state(QuicPacket, State#state.crypto_state),
+    Data = quic_packet:encode(QuicPacket, client, CryptoState),
     lager:debug("sending packet with number ~p (encoded size ~p)",
                 [quic_packet:packet_number(QuicPacket), iolist_size(Data)]),
     ok = gen_udp:send(Socket, RemoteHostname, RemotePort, Data).
 
+outbound_packet_crypto_state(#outbound_regular_packet{ crypto_state = current },
+                             CurrentCryptoState) ->
+    CurrentCryptoState;
+outbound_packet_crypto_state(#outbound_regular_packet{ crypto_state = OverridenCryptoState },
+                             _CurrentCryptoState) ->
+    OverridenCryptoState;
+outbound_packet_crypto_state(_QuicPacket, CurrentCryptoState) ->
+    CurrentCryptoState.
+
 %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
 -spec setup_connection(state()) -> state().
-setup_connection(#state{ inflow_pid = undefined,
+setup_connection(#state{ crypto_state = undefined,
+                         inflow_pid = undefined,
                          outflow_pid = undefined } = State) ->
 
     SupervisorPid = State#state.component_supervisor_pid,
     ConnectionId = crypto:rand_uniform(0, 1 bsl 64),
 
-    {ok, {InflowPid, OutflowPid, CryptoPid, CryptoShadowState}} =
+    {ok, {InflowPid, OutflowPid}} =
         quic_connection_components_sup:start_remaining_components(
-          SupervisorPid, ?MODULE, self(), ConnectionId, ?CRYPTO_STREAM_ID),
+          SupervisorPid, self(), ConnectionId,
+          ?CRYPTO_STREAM_ID, ?MODULE, self()),
     link(InflowPid),
     link(OutflowPid),
-    link(CryptoPid),
 
-    State#state{ inflow_pid = InflowPid,
-                 outflow_pid = OutflowPid,
-                 crypto_pid = CryptoPid,
-                 crypto_shadow_state = CryptoShadowState }.
+    State#state{ crypto_state = quic_crypto:initial_state(ConnectionId),
+                 inflow_pid = InflowPid,
+                 outflow_pid = OutflowPid }.
 
 -spec handle_received_data(binary(), state()) -> state().
 handle_received_data(Data, State) ->
-    CryptoShadowState = State#state.crypto_shadow_state,
-    {Packet, NewCryptoShadowState} = quic_packet:decode(Data, server, CryptoShadowState),
+    CryptoState = State#state.crypto_state,
+    {Packet, NewCryptoState} = quic_packet:decode(Data, server, CryptoState),
     InflowPid = State#state.inflow_pid,
     ok = quic_inflow:dispatch_packet(InflowPid, Packet),
-    State#state{ crypto_shadow_state = NewCryptoShadowState }.
+    State#state{ crypto_state = NewCryptoState }.

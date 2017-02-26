@@ -28,14 +28,16 @@ packet_number(#public_reset_packet{}) ->
     undefined;
 packet_number(#version_negotiation_packet{}) ->
     undefined;
-packet_number(#regular_packet{ packet_number = PacketNumber }) ->
+packet_number(#inbound_regular_packet{ packet_number = PacketNumber }) ->
+    PacketNumber;
+packet_number(#outbound_regular_packet{ packet_number = PacketNumber }) ->
     PacketNumber.
 
 %% ------------------------------------------------------------------
 %% General encoding / decoding
 %% ------------------------------------------------------------------
 
-decode(<<PublicHeader:1/binary, RemainingData/binary>>, Origin, CryptoShadowState) ->
+decode(<<PublicHeader:1/binary, RemainingData/binary>>, Origin, CryptoState) ->
     <<0:1, % unused, must be zero
       _:1, % reserved for multipath use
       PacketNumberEncoding:2,
@@ -49,10 +51,10 @@ decode(<<PublicHeader:1/binary, RemainingData/binary>>, Origin, CryptoShadowStat
                                  diversification_nonce = DiversificationNonceFlag,
                                  connection_id = ConnectionIdFlag,
                                  packet_number_encoding = PacketNumberEncoding },
-    decode(RemainingData, Origin, PublicFlags, PublicHeader, CryptoShadowState).
+    decode(RemainingData, Origin, PublicFlags, PublicHeader, CryptoState).
 
 
-encode(#public_reset_packet{} = Packet, _Origin, _CryptoShadowState) ->
+encode(#public_reset_packet{} = Packet, _Origin, _CryptoState) ->
     Flags = (2#00000010 bor % reset flag
              2#00001000),   % connection id flag
     [Flags,
@@ -60,26 +62,26 @@ encode(#public_reset_packet{} = Packet, _Origin, _CryptoShadowState) ->
      "PRST",
      quic_data_kv:encode_tagged_values(Packet#public_reset_packet.tagged_values)];
 
-encode(#version_negotiation_packet{ supported_versions = [_|_] } = Packet, _Origin, _CryptoShadowState) ->
+encode(#version_negotiation_packet{ supported_versions = [_|_] } = Packet, _Origin, _CryptoState) ->
     Flags = (2#00000001 bor % version flag
              2#00001000),   % connection id flag
     [Flags,
      encode_connection_id(Packet#version_negotiation_packet.connection_id),
      [encode_version(Version) || Version <- Packet#version_negotiation_packet.supported_versions]];
 
-encode(#regular_packet{} = Packet, _Origin, CryptoShadowState) ->
-    PacketNumber = Packet#regular_packet.packet_number,
+encode(#outbound_regular_packet{} = Packet, _Origin, CryptoState) ->
+    PacketNumber = Packet#outbound_regular_packet.packet_number,
 
     {EncodedConnectionId, ConnectionIdFlag} =
-        maybe_encode_connection_id(Packet#regular_packet.connection_id),
+        maybe_encode_connection_id(Packet#outbound_regular_packet.connection_id),
     {EncodedVersion, VersionFlag} =
-        maybe_encode_version(Packet#regular_packet.version),
+        maybe_encode_version(Packet#outbound_regular_packet.version),
     {EncodedDiversificationNonce, DiversificationNonceFlag} =
-        maybe_encode_diversification_nonce(Packet#regular_packet.diversification_nonce),
+        maybe_encode_diversification_nonce(Packet#outbound_regular_packet.diversification_nonce),
     {EncodedPacketNumber, PacketNumberEncoding} =
         quic_proto_varint:encode_u48(PacketNumber),
     EncodedFrames =
-        quic_frame:encode_frames(Packet#regular_packet.frames,
+        quic_frame:encode_frames(Packet#outbound_regular_packet.frames,
                                  PacketNumber, PacketNumberEncoding),
 
     EncodedFlags =
@@ -97,7 +99,7 @@ encode(#regular_packet{} = Packet, _Origin, CryptoShadowState) ->
 
     PreliminaryEncodedPacketSize = (iolist_size(EncodedHeader) +
                                     iolist_size(EncodedFrames) +
-                                    quic_crypto:packet_encryption_overhead(CryptoShadowState)),
+                                    quic_crypto:packet_encryption_overhead(CryptoState)),
 
     ?ASSERT(PreliminaryEncodedPacketSize =< ?MAX_IPV4_PACKET_SIZE,
             {packet_too_big, PreliminaryEncodedPacketSize, Packet}),
@@ -107,7 +109,7 @@ encode(#regular_packet{} = Packet, _Origin, CryptoShadowState) ->
 
     EncryptedPayload =
         quic_crypto:encrypt_packet_payload(PacketNumber, EncodedHeader,
-                                           PaddedEncodedFrames, CryptoShadowState),
+                                           PaddedEncodedFrames, CryptoState),
     [EncodedHeader, EncryptedPayload].
 
 %% ------------------------------------------------------------------
@@ -115,26 +117,26 @@ encode(#regular_packet{} = Packet, _Origin, CryptoShadowState) ->
 %% ------------------------------------------------------------------
 
 decode(ChunkA, _Origin, #public_flags{ reset = 1, connection_id = 1 },
-       _OriginalPublicHeader, CryptoShadowState) ->
+       _OriginalPublicHeader, CryptoState) ->
     % public reset packet
     {ChunkB, ConnectionId} = decode_connection_id(ChunkA),
     <<"PRST", EncodedTaggedValues/binary>> = ChunkB,
     {TaggedValues, <<>>} = quic_data_kv:decode_tagged_values(EncodedTaggedValues),
     {#public_reset_packet{ connection_id = ConnectionId,
                            tagged_values = TaggedValues },
-     CryptoShadowState};
+     CryptoState};
 
 decode(ChunkA, server, #public_flags{ version = 1, connection_id = 1 },
-       _OriginalPublicHeader, CryptoShadowState)  ->
+       _OriginalPublicHeader, CryptoState)  ->
     % server negotiation packet
     {ChunkB, ConnectionId} = decode_connection_id(ChunkA),
     ([_|_] = SupportedVersions) = quic_util:exact_binary_chunks(ChunkB, 4),
     {#version_negotiation_packet{ connection_id = ConnectionId,
                                   supported_versions = SupportedVersions },
-     CryptoShadowState};
+     CryptoState};
 
 decode(ChunkA, _Origin, PublicFlags,
-       OriginalPublicHeader, CryptoShadowStateA) ->
+       OriginalPublicHeader, CryptoStateA) ->
     % regular_packet packet
     lager:debug("parsing packet with public_flags ~p", [lager:pr(PublicFlags, ?MODULE)]),
     #public_flags{ version = VersionFlag,
@@ -152,18 +154,18 @@ decode(ChunkA, _Origin, PublicFlags,
                          binary:part(ChunkA, 0, byte_size(ChunkA) - byte_size(ChunkE))],
     Body = ChunkE,
 
-    CryptoShadowStateB = quic_crypto:on_diversification_nonce(DiversificationNonce, CryptoShadowStateA),
-    {DecryptedBody, CryptoShadowStateC} =
-        quic_crypto:decrypt_packet_payload(PacketNumber, BodyPrecedingData, Body, CryptoShadowStateB),
+    CryptoStateB = quic_crypto:maybe_diversify(DiversificationNonce, CryptoStateA),
+    {DecryptedBody, CryptoStateC} =
+        quic_crypto:decrypt_packet_payload(PacketNumber, BodyPrecedingData, Body, CryptoStateB),
 
     Frames = quic_frame:decode_frames(DecryptedBody, PacketNumber, PacketNumberEncoding),
 
-    {#regular_packet{ connection_id = ConnectionId,
-                      version = Version,
-                      diversification_nonce = DiversificationNonce,
-                      packet_number = PacketNumber,
-                      frames = Frames },
-     CryptoShadowStateC}.
+    {#inbound_regular_packet{ connection_id = ConnectionId,
+                              version = Version,
+                              diversification_nonce = DiversificationNonce,
+                              packet_number = PacketNumber,
+                              frames = Frames },
+     CryptoStateC}.
 
 %% ------------------------------------------------------------------
 %% Public header - connection id handling

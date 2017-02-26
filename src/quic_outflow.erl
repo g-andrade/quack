@@ -48,7 +48,7 @@
 -record(unacked_packet, {
           packet_number :: packet_number(),
           timestamp :: non_neg_integer(), % in microseconds
-          packet :: regular_packet()
+          packet :: outbound_regular_packet()
          }).
 -type unacked_packet() :: #unacked_packet{}.
 
@@ -59,6 +59,10 @@
 -type optional_packet_header() :: ({version, iodata()} |               % 4 bytes
                                    {diversification_nonce, iodata()}). % 32 bytes
 -export_type([optional_packet_header/0]).
+
+-type packet_option() :: ({headers, [optional_packet_header(), ...]} |
+                                   {crypto_state, quic_crypto:state()}).
+-export_type([packet_option/0]).
 
 %% ------------------------------------------------------------------
 %% API Function Definitions
@@ -72,10 +76,10 @@ dispatch_frame(OutflowPid, Frame) ->
     dispatch_frame(OutflowPid, Frame, []).
 
 -spec dispatch_frame(OutflowPid :: pid(), Frame :: frame(),
-                 OptionalPacketHeaders :: optional_packet_header())
+                     PacketOptions :: [packet_option()])
         -> ok.
-dispatch_frame(OutflowPid, Frame, OptionalPacketHeaders) ->
-    gen_server:cast(OutflowPid, {frame, Frame, OptionalPacketHeaders}).
+dispatch_frame(OutflowPid, Frame, PacketOptions) ->
+    gen_server:cast(OutflowPid, {frame, Frame, PacketOptions}).
 
 -spec dispatch_packet(OutflowPid :: pid(), Packet :: quic_packet()) -> ok.
 dispatch_packet(OutflowPid, Packet) ->
@@ -103,14 +107,16 @@ handle_call(Request, From, State) ->
                 [Request, From, State]),
     {noreply, State}.
 
-handle_cast({frame, Frame, OptionalPacketHeaders}, State) ->
+handle_cast({frame, Frame, PacketOptions}, State) ->
+    OptionalPacketHeaders = proplists:get_value(headers, PacketOptions, []),
     #state{ connection_id = ConnectionId } = State,
     Packet =
-        #regular_packet{
+        #outbound_regular_packet{
            connection_id = ConnectionId,
            version = proplists:get_value(version, OptionalPacketHeaders),
            diversification_nonce = proplists:get_value(diversification_nonce, OptionalPacketHeaders),
-           frames = [Frame] },
+           frames = [Frame],
+           crypto_state = proplists:get_value(crypto_state, PacketOptions, current) },
     {noreply, on_outbound_packet(Packet, State)};
 handle_cast({packet, Packet}, State) ->
     {noreply, on_outbound_packet(Packet, State)};
@@ -152,13 +158,13 @@ handle_inbound_ack(AckFrame, State) ->
     NewState = State#state{ unacked_packets = NewUnackedPackets },
     resend_all_below_largest_received(LargestReceivedPacketNumber, NewState).
 
--spec on_outbound_packet(NumberlessPacket :: regular_packet(), State :: state())
+-spec on_outbound_packet(NumberlessPacket :: outbound_regular_packet(), State :: state())
         -> NewState :: state().
 on_outbound_packet(NumberlessPacket, State) ->
     #state{ prev_packet_number = PrevPacketNumber,
             unacked_packets = UnackedPackets } = State,
     PacketNumber = PrevPacketNumber + 1,
-    Packet = NumberlessPacket#regular_packet{ packet_number = PacketNumber },
+    Packet = NumberlessPacket#outbound_regular_packet{ packet_number = PacketNumber },
     UnackedPacket =
         #unacked_packet{
            packet_number = PacketNumber,
