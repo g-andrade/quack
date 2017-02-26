@@ -40,6 +40,7 @@
 -define(CB_MODULE, ?MODULE).
 
 -define(CRYPTO_STREAM_ID, 1).
+-define(DEFAULT_PING_INTERVAL, 5).
 
 %% ------------------------------------------------------------------
 %% Record Definitions
@@ -58,7 +59,9 @@
           inflow_pid :: pid(),
           inflow_monitor :: reference(),
           outflow_pid :: pid(),
-          outflow_monitor :: reference()
+          outflow_monitor :: reference(),
+          ping_timer :: undefined | reference(),
+          ping_interval :: non_neg_integer() % in seconds
          }).
 -type state() :: #state{}.
 
@@ -128,6 +131,12 @@ handle_info({'DOWN', Reference, process, _Pid, Reason}, State)
 handle_info({'DOWN', Reference, process, _Pid, Reason}, State)
   when Reference =:= State#state.outflow_monitor  ->
     {stop, {shutdown, Reason}, State};
+handle_info(send_ping, State) ->
+    quic_outflow:dispatch_frame(State#state.outflow_pid, #ping_frame{}),
+    NewPingTimer = erlang:send_after(
+                     timer:seconds(State#state.ping_interval),
+                     self(), send_ping),
+    {noreply, State#state{ ping_timer = NewPingTimer }};
 handle_info(Info, State) ->
     lager:debug("unhandled info ~p on state ~p", [Info, State]),
     {noreply, State}.
@@ -204,12 +213,17 @@ setup_connection(#state{ crypto_state = undefined,
           SupervisorPid, self(), ConnectionId,
           ?CRYPTO_STREAM_ID, ?MODULE, self()),
 
+    PingInterval = ?DEFAULT_PING_INTERVAL,
+    IdleTimeout = PingInterval * 2,
+    PingTimer = erlang:send_after(timer:seconds(PingInterval), self(), send_ping),
     State#state{ remote_ip_address = RemoteIpAddress,
-                 crypto_state = quic_crypto:initial_state(ConnectionId),
+                 crypto_state = quic_crypto:initial_state(ConnectionId, IdleTimeout),
                  inflow_pid = InflowPid,
                  inflow_monitor = monitor(process, InflowPid),
                  outflow_pid = OutflowPid,
-                 outflow_monitor = monitor(process, OutflowPid) }.
+                 outflow_monitor = monitor(process, OutflowPid),
+                 ping_timer = PingTimer,
+                 ping_interval = PingInterval }.
 
 -spec handle_received_data(binary(), state()) -> state().
 handle_received_data(Data, State) ->
