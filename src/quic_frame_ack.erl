@@ -18,13 +18,13 @@ decode(Data, MultipleAckRangesBit, LargestReceivedEncoding, AckBlockEncoding) ->
     {ChunkA, LargestReceived} = quic_proto_varint:decode_u48(Data, LargestReceivedEncoding),
     <<EncodedLargestReceivedDeltaTime:2/binary, ChunkB/binary>> = ChunkA,
     LargestReceivedDeltaTime = quic_proto_f16:decode(EncodedLargestReceivedDeltaTime),
-    {ChunkC, AckBlocks} = decode_blocks(ChunkB, MultipleAckRangesBit, AckBlockEncoding),
+    {ChunkC, ReverseAckBlocks} = decode_blocks(ChunkB, MultipleAckRangesBit, AckBlockEncoding),
     {RemainingData, PacketTimestamps} = decode_packet_timestamps(ChunkC, LargestReceived),
 
     {RemainingData,
      #ack_frame{ largest_received = LargestReceived,
                  largest_received_time_delta = LargestReceivedDeltaTime,
-                 received_packet_blocks = AckBlocks,
+                 received_packet_blocks = lists:reverse(ReverseAckBlocks),
                  packet_timestamps = PacketTimestamps }}.
 
 encode(AckFrame) ->
@@ -32,13 +32,14 @@ encode(AckFrame) ->
                 largest_received_time_delta = LargestReceivedDeltaTime,
                 received_packet_blocks = AckBlocks,
                 packet_timestamps = PacketTimestamps } = AckFrame,
+    ReverseAckBlocks = lists:reverse(AckBlocks),
 
     {EncodedLargestReceived, LargestReceivedEncoding} =
         quic_proto_varint:encode_u48(LargestReceived),
     EncodedLargestReceivedDeltaTime =
         quic_proto_f16:encode(LargestReceivedDeltaTime),
     {EncodedAckBlocks, MultipleAckRangesBit, AckBlockEncoding} =
-        encode_blocks(AckBlocks),
+        encode_blocks(ReverseAckBlocks),
     EncodedPacketTimestamps =
         encode_packet_timestamps(PacketTimestamps, LargestReceived),
 

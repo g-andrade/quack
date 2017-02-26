@@ -258,13 +258,16 @@ generate_ack_frame([NewestBlock | _] = InboundPacketBlocks) ->
           OldestBlock,
           RemainingBlocks),
 
-    #ack_frame{
-       largest_received = LargestReceived,
-       largest_received_time_delta = LargestReceivedTimeDelta,
-       received_packet_blocks = [FirstAckReceivedPacketBlock | NthAckReceivedPacketBlocks],
-       packet_timestamps = [] % still not using these
-      }.
+    Frame =
+        #ack_frame{
+           largest_received = LargestReceived,
+           largest_received_time_delta = LargestReceivedTimeDelta,
+           received_packet_blocks = [FirstAckReceivedPacketBlock | NthAckReceivedPacketBlocks],
+           packet_timestamps = [] % still not using these
+          },
 
+    lager:debug("sending ack frame: ~p", [lager:pr(Frame, ?MODULE)]),
+    Frame.
 
 put_in_inbound_blocks(PacketNumber, L) ->
     put_in_inbound_blocks(PacketNumber, L, []).
