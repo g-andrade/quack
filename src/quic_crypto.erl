@@ -373,7 +373,7 @@ chlo_data_kv(ServerRej, PickedKeyExchangeAlgorithm, ClientNonce, ClientPublicKey
                      % leaf certificate thing
                      "XLCT" => BinEncodedLeafCertificateFnv1a64,
                      % "idle connection state", required; @TODO define it properly
-                     "ICSL" => quic_util:encode_uint(5, 4)},
+                     "ICSL" => quic_util:encode_uint(10, 4)},
 
     #data_kv{ tag = <<"CHLO">>,
               tagged_values = TaggedValues }.
