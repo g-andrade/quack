@@ -50,6 +50,7 @@
           controlling_pid :: pid(),
           controlling_pid_monitor :: reference(),
           remote_hostname :: inet:hostname(),
+          remote_ip_address :: inet:ip_address(),
           remote_port :: inet:port_number(),
           remote_sni :: iodata(),
           socket :: inet:socket(),
@@ -83,7 +84,7 @@ init([ComponentSupervisorPid, ControllingPid, RemoteHostname, RemotePort]) ->
     UdpOpts = [{active, 10},
                {mode, binary}],
     {ok, Socket} = gen_udp:open(0, UdpOpts),
-    gen_server:cast(self(), setup_connection),
+    gen_server:cast(self(), maybe_setup_connection),
     {ok, #state{
             component_supervisor_pid = ComponentSupervisorPid,
             controlling_pid = ControllingPid,
@@ -97,8 +98,8 @@ handle_call(Request, From, State) ->
                 [Request, From, State]),
     {noreply, State}.
 
-handle_cast(setup_connection, State) ->
-    {noreply, setup_connection(State)};
+handle_cast(maybe_setup_connection, State) ->
+    maybe_setup_connection(State);
 handle_cast({dispatch_packet, QuicPacket}, State) ->
     send_packet(QuicPacket, State),
     {noreply, State};
@@ -162,7 +163,7 @@ handle_inbound(HandlerPid, DataKvs) ->
 %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
 -spec send_packet(quic_packet(), state()) -> ok.
 send_packet(QuicPacket, State) ->
-    #state{ remote_hostname = RemoteHostname,
+    #state{ remote_ip_address = RemoteIpAddress,
             remote_port = RemotePort,
             socket = Socket } = State,
 
@@ -170,7 +171,7 @@ send_packet(QuicPacket, State) ->
     Data = quic_packet:encode(QuicPacket, client, CryptoState),
     lager:debug("sending packet with number ~p (encoded size ~p)",
                 [quic_packet:packet_number(QuicPacket), iolist_size(Data)]),
-    ok = gen_udp:send(Socket, RemoteHostname, RemotePort, Data).
+    ok = gen_udp:send(Socket, RemoteIpAddress, RemotePort, Data).
 
 outbound_packet_crypto_state(#outbound_regular_packet{ crypto_state = current },
                              CurrentCryptoState) ->
@@ -182,11 +183,19 @@ outbound_packet_crypto_state(_QuicPacket, CurrentCryptoState) ->
     CurrentCryptoState.
 
 %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
--spec setup_connection(state()) -> state().
+maybe_setup_connection(#state{ remote_hostname = RemoteHostname } = State) ->
+    case lookup_ip_address(RemoteHostname) of
+        {ok, RemoteIpAddress} ->
+            NewState = setup_connection(State, RemoteIpAddress),
+            {noreply, NewState};
+        {error, Error} ->
+            {stop, {shutdown, Error}, State}
+    end.
+
 setup_connection(#state{ crypto_state = undefined,
                          inflow_pid = undefined,
-                         outflow_pid = undefined } = State) ->
-
+                         outflow_pid = undefined } = State,
+                 RemoteIpAddress) ->
     SupervisorPid = State#state.component_supervisor_pid,
     ConnectionId = crypto:rand_uniform(0, 1 bsl 64),
 
@@ -195,7 +204,8 @@ setup_connection(#state{ crypto_state = undefined,
           SupervisorPid, self(), ConnectionId,
           ?CRYPTO_STREAM_ID, ?MODULE, self()),
 
-    State#state{ crypto_state = quic_crypto:initial_state(ConnectionId),
+    State#state{ remote_ip_address = RemoteIpAddress,
+                 crypto_state = quic_crypto:initial_state(ConnectionId),
                  inflow_pid = InflowPid,
                  inflow_monitor = monitor(process, InflowPid),
                  outflow_pid = OutflowPid,
@@ -208,3 +218,10 @@ handle_received_data(Data, State) ->
     InflowPid = State#state.inflow_pid,
     ok = quic_inflow:dispatch_packet(InflowPid, Packet),
     State#state{ crypto_state = NewCryptoState }.
+
+lookup_ip_address(Hostname) ->
+    % TODO: handle IPv6
+    case inet:getaddr(Hostname, inet) of
+        {ok, Ipv4Address} -> {ok, Ipv4Address};
+        {error, Ipv4Err} -> {error, Ipv4Err}
+    end.
