@@ -33,10 +33,12 @@
 
 -record(state, {
           outflow_pid :: pid(),
+          outflow_monitor :: reference(),
           % @TODO: we need a more performant data structure for this,
           % otherwise out-of-order packets will kill performance
           inbound_packet_blocks :: [inbound_packet_block()],
-          stream_pids :: #{stream_id() => pid()}
+          streams :: #{stream_id() => pid()},
+          stream_monitors :: #{reference() => stream_id()}
          }).
 -type state() :: #state{}.
 -export_type([state/0]).
@@ -67,10 +69,12 @@ init([OutflowPid, InitialStreams]) ->
     InitialState =
         #state{
            outflow_pid = OutflowPid,
+           outflow_monitor = monitor(process, OutflowPid),
            inbound_packet_blocks = [],
-           stream_pids = InitialStreams
+           streams = #{},
+           stream_monitors = #{}
           },
-    {ok, InitialState}.
+    {ok, register_streams(InitialStreams, InitialState)}.
 
 handle_call(Request, From, State) ->
     lager:debug("unhandled call ~p from ~p on state ~p",
@@ -84,6 +88,21 @@ handle_cast(Msg, State) ->
     lager:debug("unhandled cast ~p on state ~p", [Msg, State]),
     {noreply, State}.
 
+handle_info({'DOWN', Reference, process, _Pid, _Reason}, State)
+  when Reference =:= State#state.outflow_monitor ->
+    {stop, normal, State};
+handle_info({'DOWN', Reference, process, _Pid, _Reason} = Info, State) ->
+    case maps:find(Reference, State#state.stream_monitors) of
+        {ok, StreamId} ->
+            NewStreams = maps:remove(StreamId, State#state.streams),
+            NewStreamMonitors = maps:remove(Reference, State#state.stream_monitors),
+            NewState = State#state{ streams = NewStreams,
+                                    stream_monitors = NewStreamMonitors },
+            {noreply, NewState};
+        error ->
+            lager:debug("unhandled info ~p on state ~p", [Info, State]),
+            {noreply, State}
+    end;
 handle_info(Info, State) ->
     lager:debug("unhandled info ~p on state ~p", [Info, State]),
     {noreply, State}.
@@ -97,6 +116,20 @@ code_change(_OldVsn, State, _Extra) ->
 %% ------------------------------------------------------------------
 %% Internal Function Definitions
 %% ------------------------------------------------------------------
+
+register_streams(Streams, State) ->
+    {FinalStreams, FinalStreamMonitors} =
+        maps:fold(
+          fun (StreamId, StreamPid, {StreamsAcc, StreamMonitorsAcc}) ->
+                  StreamMonitor = monitor(process, StreamPid),
+                  {maps:put(StreamId, StreamPid, StreamsAcc),
+                   maps:put(StreamMonitor, StreamId, StreamMonitorsAcc)}
+          end,
+          {State#state.streams, State#state.stream_monitors},
+          Streams),
+    State#state{
+      streams = FinalStreams,
+      stream_monitors = FinalStreamMonitors }.
 
 -spec on_inbound_packet(inbound_regular_packet(), state()) -> state().
 on_inbound_packet(#inbound_regular_packet{ packet_number = PacketNumber } = Packet,
@@ -128,7 +161,7 @@ handle_received_packet(#inbound_regular_packet{ frames = Frames }, State) ->
 handle_received_frame(Frame, State)
   when is_record(Frame, stream_frame) ->
     StreamId = Frame#stream_frame.stream_id,
-    StreamPid = maps:get(StreamId, State#state.stream_pids),
+    StreamPid = maps:get(StreamId, State#state.streams),
     quic_stream:dispatch_inbound_frame(StreamPid, Frame),
     State;
 handle_received_frame(Frame, State)

@@ -55,7 +55,9 @@
           socket :: inet:socket(),
           crypto_state :: quic_crypto:state(),
           inflow_pid :: pid(),
-          outflow_pid :: pid()
+          inflow_monitor :: reference(),
+          outflow_pid :: pid(),
+          outflow_monitor :: reference()
          }).
 -type state() :: #state{}.
 
@@ -183,12 +185,12 @@ setup_connection(#state{ crypto_state = undefined,
         quic_connection_components_sup:start_remaining_components(
           SupervisorPid, self(), ConnectionId,
           ?CRYPTO_STREAM_ID, ?MODULE, self()),
-    link(InflowPid),
-    link(OutflowPid),
 
     State#state{ crypto_state = quic_crypto:initial_state(ConnectionId),
                  inflow_pid = InflowPid,
-                 outflow_pid = OutflowPid }.
+                 inflow_monitor = monitor(process, InflowPid),
+                 outflow_pid = OutflowPid,
+                 outflow_monitor = monitor(process, OutflowPid) }.
 
 -spec handle_received_data(binary(), state()) -> state().
 handle_received_data(Data, State) ->

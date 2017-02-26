@@ -37,6 +37,7 @@
 
 -record(state, {
           connection_pid :: pid(),
+          connection_monitor :: reference(),
           connection_id :: connection_id(),
           prev_packet_number :: packet_number(),
           % @TODO: use a more performant data structure for this?
@@ -97,6 +98,7 @@ init([ConnectionPid, ConnectionId]) ->
     InitialState =
         #state{
            connection_pid = ConnectionPid,
+           connection_monitor = monitor(process, ConnectionPid),
            connection_id = ConnectionId,
            prev_packet_number = 0,
            unacked_packets = [] },
@@ -126,6 +128,9 @@ handle_cast(Msg, State) ->
     lager:debug("unhandled cast ~p on state ~p", [Msg, State]),
     {noreply, State}.
 
+handle_info({'DOWN', Reference, process, _Pid, _Reason}, State)
+  when Reference =:= State#state.connection_monitor ->
+    {stop, normal, State};
 handle_info(Info, State) ->
     lager:debug("unhandled info ~p on state ~p", [Info, State]),
     {noreply, State}.

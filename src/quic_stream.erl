@@ -38,6 +38,7 @@
           stream_id :: stream_id(),
           data_packing :: data_packing(),
           outflow_pid :: pid(),
+          outflow_monitor :: reference(),
           handler_module :: module(),
           handler_pid :: pid(),
           instream :: quic_instream:window(),
@@ -94,6 +95,7 @@ init([StreamId, OutflowPid, HandlerModule, HandlerPid]) ->
            stream_id = StreamId,
            data_packing = DataPacking,
            outflow_pid = OutflowPid,
+           outflow_monitor = monitor(process, OutflowPid),
            handler_module = HandlerModule,
            handler_pid = HandlerPid,
            instream = new_instream(DataPacking),
@@ -128,6 +130,9 @@ handle_cast({outbound_value, OutboundValue, Options}, State) ->
     quic_outflow:dispatch_frame(State#state.outflow_pid, Frame, Options),
     {noreply, NewState}.
 
+handle_info({'DOWN', Reference, process, _Pid, _Reason}, State)
+  when Reference =:= State#state.outflow_monitor ->
+    {stop, normal, State};
 handle_info(Info, State) ->
     lager:debug("unhandled info ~p on state ~p", [Info, State]),
     {noreply, State}.
