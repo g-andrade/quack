@@ -150,8 +150,9 @@ encode_padding_frame(#padding_frame{ size = Size }) ->
 
 decode_reset_stream_frame(<<StreamId:4/little-unsigned-integer-unit:8,
                             ByteOffset:8/little-unsigned-integer-unit:8,
-                            ErrorCode:4/binary,
+                            EncodedErrorCode:4/little-unsigned-integer-unit:8,
                             RemainingData/binary>>) ->
+    ErrorCode = quic_rst_stream_error:decode(EncodedErrorCode),
     {RemainingData,
      #reset_stream_frame{ stream_id = StreamId,
                           byte_offset = ByteOffset,
@@ -160,26 +161,29 @@ decode_reset_stream_frame(<<StreamId:4/little-unsigned-integer-unit:8,
 encode_reset_stream_frame(#reset_stream_frame{ stream_id = StreamId,
                                                byte_offset = ByteOffset,
                                                error_code = ErrorCode }) ->
+    EncodedErrorCode = quic_rst_stream_error:encode(ErrorCode),
     <<StreamId:4/little-unsigned-integer-unit:8,
       ByteOffset:8/little-unsigned-integer-unit:8,
-      ErrorCode:4/binary>>.
+      EncodedErrorCode:4/little-unsigned-integer-unit:8>>.
 
 %% ------------------------------------------------------------------
 %% Connection close frame handling
 %% ------------------------------------------------------------------
 
-decode_connection_close_frame(<<ErrorCode:4/binary,
+decode_connection_close_frame(<<EncodedErrorCode:4/little-unsigned-integer-unit:8,
                                 ReasonPhraseLength:2/little-unsigned-integer-unit:8,
                                 ReasonPhrase:ReasonPhraseLength/binary,
                                 RemainingData/binary>>) ->
+    ErrorCode = quic_error:decode(EncodedErrorCode),
     {RemainingData,
      #connection_close_frame{ error_code = ErrorCode,
                               reason_phrase = ReasonPhrase }}.
 
 encode_connection_close_frame(#connection_close_frame{ error_code = ErrorCode,
                                                        reason_phrase = ReasonPhrase }) ->
+    EncodedErrorCode = quic_error:encode(ErrorCode),
     ReasonPhraseLength = byte_size(ReasonPhrase),
-    <<ErrorCode:4/binary,
+    <<EncodedErrorCode:4/little-unsigned-integer-unit:8,
       ReasonPhraseLength:2/little-unsigned-integer-unit:8,
       ReasonPhrase/binary>>.
 
@@ -187,11 +191,12 @@ encode_connection_close_frame(#connection_close_frame{ error_code = ErrorCode,
 %% Go away frame handling
 %% ------------------------------------------------------------------
 
-decode_go_away_frame(<<ErrorCode:4/binary,
+decode_go_away_frame(<<EncodedErrorCode:4/little-unsigned-integer-unit:8,
                        LastGoodStreamId:4/little-unsigned-integer-unit:8,
                        ReasonPhraseLength:2/little-unsigned-integer-unit:8,
                        ReasonPhrase:ReasonPhraseLength/binary,
                        RemainingData/binary>>) ->
+    ErrorCode = quic_error:decode(EncodedErrorCode),
     {RemainingData,
      #go_away_frame{ error_code = ErrorCode,
                      last_good_stream_id = LastGoodStreamId,
@@ -200,8 +205,9 @@ decode_go_away_frame(<<ErrorCode:4/binary,
 encode_go_away_frame(#go_away_frame{ error_code = ErrorCode,
                                      last_good_stream_id = LastGoodStreamId,
                                      reason_phrase = ReasonPhrase }) ->
+    EncodedErrorCode = quic_error:encode(ErrorCode),
     ReasonPhraseLength = byte_size(ReasonPhrase),
-    <<ErrorCode:4/binary,
+    <<EncodedErrorCode:4/little-unsigned-integer-unit:8,
       LastGoodStreamId:4/little-unsigned-integer-unit:8,
       ReasonPhraseLength:2/little-unsigned-integer-unit:8,
       ReasonPhrase/binary>>.

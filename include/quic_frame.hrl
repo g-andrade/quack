@@ -93,7 +93,7 @@
 -record(reset_stream_frame, {
           stream_id :: stream_id(),
           byte_offset :: uint64(),
-          error_code :: binary()
+          error_code :: quic_rst_stream_error:decoded_value()
          }).
 -type reset_stream_frame() :: #reset_stream_frame{}.
 
@@ -102,7 +102,7 @@
 %% ------------------------------------------------------------------
 
 -record(connection_close_frame, {
-          error_code :: binary(),
+          error_code :: quic_error:decoded_value(),
           reason_phrase :: binary()
          }).
 -type connection_close_frame() :: #connection_close_frame{}.
@@ -112,7 +112,7 @@
 %% ------------------------------------------------------------------
 
 -record(go_away_frame, {
-          error_code :: binary(),
+          error_code :: quic_error:decoded_value(),
           last_good_stream_id :: stream_id(),
           reason_phrase :: binary()
          }).
