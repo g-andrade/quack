@@ -1,5 +1,5 @@
--module(quic_instream_data_kv).
--behaviour(quic_instream).
+-module(quic_instream_window_data_kv).
+-behaviour(quic_instream_window).
 
 %% ------------------------------------------------------------------
 %% API Function Exports
@@ -8,7 +8,7 @@
 -export([new/1]).
 
 %% ------------------------------------------------------------------
-%% quic_instream Function Exports
+%% quic_instream_window Function Exports
 %% ------------------------------------------------------------------
 
 -export([new_cb/1]).
@@ -19,53 +19,53 @@
 %% Record Definitions
 %% ------------------------------------------------------------------
 
--record(data_kv_instream, {
-          data_instream :: quic_instream:value(),
+-record(data_kv_instream_window, {
+          data_instream_window :: quic_instream_window:value(),
           undecoded_buffer :: binary()
          }).
--opaque value() :: #data_kv_instream{}.
+-opaque value() :: #data_kv_instream_window{}.
 -export_type([value/0]).
 
 %% ------------------------------------------------------------------
 %% API Function Definitions
 %% ------------------------------------------------------------------
 
--spec new(DataInstream :: quic_instream:value()) -> quic_instream:value().
+-spec new(DataInstream :: quic_instream_window:value()) -> quic_instream_window:value().
 new(DataInstream) ->
-    quic_instream:new(?MODULE, [DataInstream]).
+    quic_instream_window:new(?MODULE, [DataInstream]).
 
 %% ------------------------------------------------------------------
-%% quic_instream Function Definitions
+%% quic_instream_window Function Definitions
 %% ------------------------------------------------------------------
 
--spec new_cb(Args :: [DataInstream :: quic_instream:value()]) -> value().
+-spec new_cb(Args :: [DataInstream :: quic_instream_window:value()]) -> value().
 new_cb([DataInstream]) ->
-    #data_kv_instream{
-       data_instream = DataInstream,
+    #data_kv_instream_window{
+       data_instream_window = DataInstream,
        undecoded_buffer = <<>>
       }.
 
 -spec insert_cb(DataKvInstream :: value(), ChunkOffset :: non_neg_integer(), Chunk :: iodata())
         -> {ok, NewDataKvInstream :: value()} | {error, stale_data | overlapping_data | window_full}.
-insert_cb(#data_kv_instream{ data_instream = DataInstream } = DataKvInstream, ChunkOffset, Chunk) ->
-    case quic_instream:insert(DataInstream, ChunkOffset, Chunk) of
+insert_cb(#data_kv_instream_window{ data_instream_window = DataInstream } = DataKvInstream, ChunkOffset, Chunk) ->
+    case quic_instream_window:insert(DataInstream, ChunkOffset, Chunk) of
         {ok, NewDataInstream} ->
-            {ok, DataKvInstream#data_kv_instream{ data_instream = NewDataInstream }};
+            {ok, DataKvInstream#data_kv_instream_window{ data_instream_window = NewDataInstream }};
         {error, _} = Error ->
             Error
     end.
 
 -spec consume_cb(DataKvInstream :: value()) 
         -> {NewDataKvInstream :: value(), DataKvs :: [quic_data_kv:data_kv()]}.
-consume_cb(#data_kv_instream{ data_instream = DataInstream } = DataKvInstream) ->
-    {NewDataInstream, {DataSize, Data}} = quic_instream:consume(DataInstream),
+consume_cb(#data_kv_instream_window{ data_instream_window = DataInstream } = DataKvInstream) ->
+    {NewDataInstream, {DataSize, Data}} = quic_instream_window:consume(DataInstream),
     case DataSize > 0 of
-        false -> {DataKvInstream#data_kv_instream{ data_instream = NewDataInstream }, []};
+        false -> {DataKvInstream#data_kv_instream_window{ data_instream_window = NewDataInstream }, []};
         true ->
-            UndecodedBuffer = DataKvInstream#data_kv_instream.undecoded_buffer,
+            UndecodedBuffer = DataKvInstream#data_kv_instream_window.undecoded_buffer,
             UndecodedBufferB = iolist_to_binary([UndecodedBuffer, Data]),
             {UndecodedBufferC, DataKvs} = consume_all_kvs(UndecodedBufferB),
-            NewDataKvInstream = DataKvInstream#data_kv_instream{ data_instream = NewDataInstream,
+            NewDataKvInstream = DataKvInstream#data_kv_instream_window{ data_instream_window = NewDataInstream,
                                        undecoded_buffer = UndecodedBufferC },
             {NewDataKvInstream, DataKvs}
     end.

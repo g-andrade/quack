@@ -1,5 +1,5 @@
--module(quic_instream_unordered_data).
--behaviour(quic_instream).
+-module(quic_instream_window_unordered_data).
+-behaviour(quic_instream_window).
 
 %% ------------------------------------------------------------------
 %% API Function Exports
@@ -8,7 +8,7 @@
 -export([new/0]).
 
 %% ------------------------------------------------------------------
-%% quic_instream Function Exports
+%% quic_instream_window Function Exports
 %% ------------------------------------------------------------------
 
 -export([new_cb/1]).
@@ -57,12 +57,12 @@
 %% API Function Definitions
 %% ------------------------------------------------------------------
 
--spec new() -> quic_instream:value().
+-spec new() -> quic_instream_window:value().
 new() ->
-    quic_instream:new(?MODULE, [?DEFAULT_CAPACITY]).
+    quic_instream_window:new(?MODULE, [?DEFAULT_CAPACITY]).
 
 %% ------------------------------------------------------------------
-%% quic_instream Function Definitions
+%% quic_instream_window Function Definitions
 %% ------------------------------------------------------------------
 
 -spec new_cb([Capacity :: non_neg_integer()]) -> contiguous().
