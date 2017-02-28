@@ -75,7 +75,16 @@ dispatch_value(Pid, OutboundValue, Options) ->
 %% gen_server Function Definitions
 %% ------------------------------------------------------------------
 
-init([OutflowPid, StreamId, HandlerModule, HandlerPid]) ->
+init(Args) ->
+    gen_server:cast(self(), {initialize, Args}),
+    {ok, uninitialized}.
+
+handle_call(Request, From, State) when State =/= uninitialized ->
+    lager:debug("unhandled call ~p from ~p on state ~p",
+                [Request, From, State]),
+    {noreply, State}.
+
+handle_cast({initialize, [OutflowPid, StreamId, HandlerModule, HandlerPid]}, uninitialized) ->
     {ok, DataPacking} = HandlerModule:start_outstream(HandlerPid, StreamId, self()),
     InitialState =
         #state{
@@ -87,13 +96,7 @@ init([OutflowPid, StreamId, HandlerModule, HandlerPid]) ->
            handler_pid = HandlerPid,
            outstream_offset = 0
           },
-    {ok, InitialState}.
-
-handle_call(Request, From, State) ->
-    lager:debug("unhandled call ~p from ~p on state ~p",
-                [Request, From, State]),
-    {noreply, State}.
-
+    {noreply, InitialState};
 handle_cast({outbound_value, OutboundValue, Options}, State) ->
     Data = pack_outbound_value(OutboundValue, State#state.data_packing),
     DataSize = iolist_size(Data),
@@ -107,14 +110,14 @@ handle_cast({outbound_value, OutboundValue, Options}, State) ->
                data_payload = Data },
     quic_outflow:dispatch_frame(State#state.outflow_pid, Frame, Options),
     {noreply, NewState};
-handle_cast(Msg, State) ->
+handle_cast(Msg, State) when State =/= uninitialized ->
     lager:debug("unhandled cast ~p on state ~p", [Msg, State]),
     {noreply, State}.
 
 handle_info({'DOWN', Reference, process, _Pid, _Reason}, State)
   when Reference =:= State#state.outflow_monitor ->
     {stop, normal, State};
-handle_info(Info, State) ->
+handle_info(Info, State) when State =/= uninitialized ->
     lager:debug("unhandled info ~p on state ~p", [Info, State]),
     {noreply, State}.
 
