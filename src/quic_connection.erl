@@ -119,7 +119,8 @@ init([ComponentSupervisorPid, ControllingPid, RemoteHostname, RemotePort,
 handle_call(connect, From, State) ->
     start_setting_up_connection(From, State);
 handle_call(close, _From, State) ->
-    close_connection(State);
+    close_connection(State),
+    {reply, ok, State};
 handle_call(Request, From, State) ->
     lager:debug("unhandled call ~p from ~p on state ~p",
                 [Request, From, State]),
@@ -153,7 +154,8 @@ handle_info({udp, Socket, _SenderIp, _SenderPort, Data}, #state{ socket = Socket
     {noreply, NewState};
 handle_info({'DOWN', Reference, process, _Pid, _Reason}, State)
   when Reference =:= State#state.controlling_pid_monitor ->
-    {stop, oops, State};
+    close_connection(State),
+    {noreply, State};
 handle_info({'DOWN', Reference, process, _Pid, Reason}, State)
   when Reference =:= State#state.inflow_monitor  ->
     {stop, {shutdown, Reason}, State};
@@ -261,13 +263,12 @@ start_setting_up_connection(Requester,
                  outflow_monitor = monitor(process, OutflowPid),
                  ping_interval = PingInterval }.
 
-close_connection(#state{ outflow_pid = OutflowPid } = State) ->
+close_connection(#state{ outflow_pid = OutflowPid }) ->
     CloseFrame =
         #connection_close_frame{
            error_code = peer_going_away,
            reason_phrase = <<"goodbye">> },
-    quic_outflow:dispatch_frame(OutflowPid, CloseFrame),
-    {reply, ok, State}.
+    quic_outflow:dispatch_frame(OutflowPid, CloseFrame).
 
 -spec handle_received_data(binary(), state()) -> state().
 handle_received_data(Data, State) ->
