@@ -12,7 +12,6 @@
 %% ------------------------------------------------------------------
 
 -export([initial_state/2]).
--export([is_fully_setup/1]).
 -export([start_stream/2]).
 -export([handle_stream_inbound/2]).
 -export([maybe_diversify/2]).
@@ -152,9 +151,6 @@
 initial_state(ConnectionId, IdleTimeout) ->
     #unstarted{ connection_id = ConnectionId,
                 idle_timeout = IdleTimeout }.
-
-is_fully_setup(State) ->
-    is_record(State, forward_secure_encryption).
 
 start_stream(StreamPid, #unstarted{} = State) ->
     ConnectionId = State#unstarted.connection_id,
@@ -460,6 +456,7 @@ on_server_hello(#data_kv{ tag = <<"SHLO">>,
                  client_iv = ClientIv,
                  server_iv = ServerIv },
 
+    quic_connection:notify_readiness(self()),
     #forward_secure_encryption{
        connection_id = ConnectionId,
        idle_timeout = IdleTimeout,

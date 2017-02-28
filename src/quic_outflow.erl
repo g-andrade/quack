@@ -119,9 +119,9 @@ handle_cast({frame, Frame, PacketOptions}, State) ->
            diversification_nonce = proplists:get_value(diversification_nonce, OptionalPacketHeaders),
            frames = [Frame],
            crypto_state = proplists:get_value(crypto_state, PacketOptions, current) },
-    {noreply, on_outbound_packet(Packet, State)};
+    on_outbound_packet(Packet, State);
 handle_cast({packet, Packet}, State) ->
-    {noreply, on_outbound_packet(Packet, State)};
+    on_outbound_packet(Packet, State);
 handle_cast({inbound_ack, AckFrame}, State) ->
     {noreply, handle_inbound_ack(AckFrame, State)};
 handle_cast(Msg, State) ->
@@ -164,7 +164,7 @@ handle_inbound_ack(AckFrame, State) ->
     resend_all_below_largest_received(LargestReceivedPacketNumber, NewState).
 
 -spec on_outbound_packet(NumberlessPacket :: outbound_regular_packet(), State :: state())
-        -> NewState :: state().
+        -> {noreply, state()} | {stop, normal, state()}.
 on_outbound_packet(NumberlessPacket, State) ->
     #state{ prev_packet_number = PrevPacketNumber,
             unacked_packets = UnackedPackets } = State,
@@ -183,7 +183,10 @@ on_outbound_packet(NumberlessPacket, State) ->
 
     ConnectionPid = State#state.connection_pid,
     quic_connection:dispatch_packet(ConnectionPid, Packet),
-    NewState.
+    case should_stop_after_sending_packet(Packet) of
+        false -> {noreply, NewState};
+        true -> {stop, normal, NewState}
+    end.
 
 filter_unacked_packets(UnackedPackets, LargestReceivedPacketNumber, ReceivedPacketBlocks) ->
     {RecentUnacked, RemainingPackets} =
@@ -272,3 +275,16 @@ resend_all_below_largest_received(LargestReceivedPacketNumber, State) ->
            PacketsToResend)
      end),
     NewState.
+
+should_stop_after_sending_packet(#version_negotiation_packet{}) ->
+    false;
+should_stop_after_sending_packet(#public_reset_packet{}) ->
+    true;
+should_stop_after_sending_packet(#outbound_regular_packet{ frames = Frames }) ->
+    lists:any(
+      fun (#connection_close_frame{}) ->
+              true;
+          (_) ->
+              false
+      end,
+      Frames).

@@ -14,6 +14,10 @@
 
 -export([start_link/4]). -ignore_xref({start_link,4}).
 -export([dispatch_packet/2]).
+-export([notify_readiness/1]).
+
+-export([connect/1]).
+-export([close/1]).
 
 %% ------------------------------------------------------------------
 %% gen_server Function Exports
@@ -48,6 +52,7 @@
 
 -record(state, {
           component_supervisor_pid :: pid(),
+          requester :: {pid(), reference()},
           controlling_pid :: pid(),
           controlling_pid_monitor :: reference(),
           remote_hostname :: inet:hostname(),
@@ -79,6 +84,15 @@ start_link(ComponentSupervisorPid, ControllingPid, RemoteHostname, RemotePort) -
 dispatch_packet(ConnectionPid, Packet) ->
     gen_server:cast(ConnectionPid, {dispatch_packet, Packet}).
 
+notify_readiness(ConnectionPid) ->
+    gen_server:cast(ConnectionPid, notify_readiness).
+
+connect(ConnectionPid) ->
+    gen_server:call(ConnectionPid, connect).
+
+close(#{ connection_pid := ConnectionPid }) ->
+    gen_server:call(ConnectionPid, close).
+
 %% ------------------------------------------------------------------
 %% gen_server Function Definitions
 %% ------------------------------------------------------------------
@@ -87,7 +101,6 @@ init([ComponentSupervisorPid, ControllingPid, RemoteHostname, RemotePort]) ->
     UdpOpts = [{active, 10},
                {mode, binary}],
     {ok, Socket} = gen_udp:open(0, UdpOpts),
-    gen_server:cast(self(), maybe_setup_connection),
     {ok, #state{
             component_supervisor_pid = ComponentSupervisorPid,
             controlling_pid = ControllingPid,
@@ -96,13 +109,15 @@ init([ComponentSupervisorPid, ControllingPid, RemoteHostname, RemotePort]) ->
             remote_port = RemotePort,
             socket = Socket }}.
 
+handle_call(connect, From, State) ->
+    start_setting_up_connection(From, State);
+handle_call(close, _From, State) ->
+    close_connection(State);
 handle_call(Request, From, State) ->
     lager:debug("unhandled call ~p from ~p on state ~p",
                 [Request, From, State]),
     {noreply, State}.
 
-handle_cast(maybe_setup_connection, State) ->
-    maybe_setup_connection(State);
 handle_cast({dispatch_packet, QuicPacket}, State) ->
     send_packet(QuicPacket, State),
     {noreply, State};
@@ -112,6 +127,13 @@ handle_cast({start_quic_crypto_stream, StreamPid}, #state{ crypto_state = Crypto
 handle_cast({crypto_stream_inbound, DataKv}, #state{ crypto_state = CryptoState } = State) ->
     NewCryptoState = quic_crypto:handle_stream_inbound(DataKv, CryptoState),
     {noreply, State#state{ crypto_state = NewCryptoState }};
+handle_cast(notify_readiness, State) ->
+    Connection = #{ connection_pid => self() },
+    gen_server:reply(State#state.requester, {ok, Connection}),
+    #state{ ping_interval = PingInterval } = State,
+    PingTimer = erlang:send_after(timer:seconds(PingInterval), self(), send_ping),
+    {noreply, State#state{ requester = undefined,
+                           ping_timer = PingTimer }};
 handle_cast(Msg, State) ->
     lager:debug("unhandled cast ~p on state ~p", [Msg, State]),
     {noreply, State}.
@@ -192,19 +214,21 @@ outbound_packet_crypto_state(_QuicPacket, CurrentCryptoState) ->
     CurrentCryptoState.
 
 %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
-maybe_setup_connection(#state{ remote_hostname = RemoteHostname } = State) ->
+start_setting_up_connection(Requester, #state{ remote_hostname = RemoteHostname } = State) ->
     case lookup_ip_address(RemoteHostname) of
         {ok, RemoteIpAddress} ->
-            NewState = setup_connection(State, RemoteIpAddress),
+            NewState = start_setting_up_connection(Requester, State, RemoteIpAddress),
             {noreply, NewState};
         {error, Error} ->
             {stop, {shutdown, Error}, State}
     end.
 
-setup_connection(#state{ crypto_state = undefined,
-                         inflow_pid = undefined,
-                         outflow_pid = undefined } = State,
-                 RemoteIpAddress) ->
+start_setting_up_connection(Requester,
+                            #state{ requester = undefined,
+                                    crypto_state = undefined,
+                                    inflow_pid = undefined,
+                                    outflow_pid = undefined } = State,
+                            RemoteIpAddress) ->
     SupervisorPid = State#state.component_supervisor_pid,
     ConnectionId = crypto:rand_uniform(0, 1 bsl 64),
 
@@ -215,15 +239,22 @@ setup_connection(#state{ crypto_state = undefined,
 
     PingInterval = ?DEFAULT_PING_INTERVAL,
     IdleTimeout = PingInterval * 2,
-    PingTimer = erlang:send_after(timer:seconds(PingInterval), self(), send_ping),
-    State#state{ remote_ip_address = RemoteIpAddress,
+    State#state{ requester = Requester,
+                 remote_ip_address = RemoteIpAddress,
                  crypto_state = quic_crypto:initial_state(ConnectionId, IdleTimeout),
                  inflow_pid = InflowPid,
                  inflow_monitor = monitor(process, InflowPid),
                  outflow_pid = OutflowPid,
                  outflow_monitor = monitor(process, OutflowPid),
-                 ping_timer = PingTimer,
                  ping_interval = PingInterval }.
+
+close_connection(#state{ outflow_pid = OutflowPid } = State) ->
+    CloseFrame =
+        #connection_close_frame{
+           error_code = peer_going_away,
+           reason_phrase = <<"goodbye">> },
+    quic_outflow:dispatch_frame(OutflowPid, CloseFrame),
+    {reply, ok, State}.
 
 -spec handle_received_data(binary(), state()) -> state().
 handle_received_data(Data, State) ->

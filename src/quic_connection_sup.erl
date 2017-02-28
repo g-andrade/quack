@@ -30,7 +30,7 @@ start_link() ->
 start_connection(ConnectionArgs) ->
     {ok, ComponentSupervisorPid} = supervisor:start_child(?MODULE, [ConnectionArgs]),
     ConnectionPid = quic_connection_components_sup:get_connection_pid(ComponentSupervisorPid),
-    {ok, ConnectionPid}.
+    {ok, _Connection} = quic_connection:connect(ConnectionPid).
 
 %% ------------------------------------------------------------------
 %% supervisor Function Definitions
