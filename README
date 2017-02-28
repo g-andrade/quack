@@ -1,3 +1,15 @@
-Work in progress at the moment:
 * QUIC version 35
-* Client only 
+* Client only (for now)
+
+Progress:
+* Most (perhaps all?) packet formats can be encoded/decoded (from/to records)
+* Most (perhaps all?) frame types can be encoded/decoded (from/to records)
+* Tag value maps can be encoded/decoded (from/to maps)
+* Error codes can be encoded/decoded (from/to atoms)
+* Connection-level out-of-order packet arrival is handled
+* Stream-level out-of-order frame arrival is handled
+* Received packets are acknowledged to the other end (current approach is very naive)
+* Sent packets are kept in memory and purged/resent as requested by ther other end (current approach is very naive)
+* Outbound packets are automatically padded as necessary to fill the target IPv4 MTU (1350 bytes)
+* Initial connection can be established
+* Crypto stream is opened, key diversification is handled, forward-secure parameters are negotiated (curve25519 / AES GCM)
