@@ -8,7 +8,7 @@
 %% API Function Exports
 %% ------------------------------------------------------------------
 
--export([start_link/2]). -ignore_xref({start_link,2}).
+-export([start_link/5]). -ignore_xref({start_link,5}).
 -export([dispatch_packet/2]).
 
 %% ------------------------------------------------------------------
@@ -44,13 +44,17 @@
 %% ------------------------------------------------------------------
 
 -record(state, {
+          streams_supervisor_pid :: pid(),
+          streams_supervisor_monitor :: reference(),
           outflow_pid :: pid(),
           outflow_monitor :: reference(),
           % @TODO: we need a more performant data structure for this,
           % otherwise out-of-order packets will kill performance
           inbound_packet_blocks :: [inbound_packet_block()],
           streams :: #{stream_id() => pid()},
-          stream_monitors :: #{reference() => stream_id()}
+          stream_monitors :: #{reference() => stream_id()},
+          default_stream_handler :: module(),
+          default_stream_handler_pid :: pid()
          }).
 -type state() :: #state{}.
 -export_type([state/0]).
@@ -66,8 +70,11 @@
 %% API Function Definitions
 %% ------------------------------------------------------------------
 
-start_link(OutflowPid, InitialStreams) ->
-    gen_server:start_link(?CB_MODULE, [OutflowPid, InitialStreams], []).
+start_link(StreamsSupervisorPid, OutflowPid, InitialStreams,
+           DefaultStreamHandler, DefaultStreamHandlerPid) ->
+    gen_server:start_link(?CB_MODULE, [StreamsSupervisorPid, OutflowPid, InitialStreams,
+                                       DefaultStreamHandler, DefaultStreamHandlerPid],
+                          []).
 
 -spec dispatch_packet(InflowPid :: pid(), quic_packet()) -> ok.
 dispatch_packet(InflowPid, Packet) ->
@@ -77,14 +84,18 @@ dispatch_packet(InflowPid, Packet) ->
 %% gen_server Function Definitions
 %% ------------------------------------------------------------------
 
-init([OutflowPid, InitialStreams]) ->
+init([StreamsSupervisorPid, OutflowPid, InitialStreams, DefaultStreamHandler, DefaultStreamHandlerPid]) ->
     InitialState =
         #state{
+           streams_supervisor_pid = StreamsSupervisorPid,
+           streams_supervisor_monitor = monitor(process, StreamsSupervisorPid),
            outflow_pid = OutflowPid,
            outflow_monitor = monitor(process, OutflowPid),
            inbound_packet_blocks = [],
            streams = #{},
-           stream_monitors = #{}
+           stream_monitors = #{},
+           default_stream_handler = DefaultStreamHandler,
+           default_stream_handler_pid = DefaultStreamHandlerPid
           },
     {ok, register_streams(InitialStreams, InitialState)}.
 
@@ -99,6 +110,9 @@ handle_cast(Msg, State) ->
     lager:debug("unhandled cast ~p on state ~p", [Msg, State]),
     {noreply, State}.
 
+handle_info({'DOWN', Reference, process, _Pid, _Reason}, State)
+  when Reference =:= State#state.streams_supervisor_monitor ->
+    {stop, normal, State};
 handle_info({'DOWN', Reference, process, _Pid, _Reason}, State)
   when Reference =:= State#state.outflow_monitor ->
     {stop, normal, State};
@@ -141,6 +155,23 @@ register_streams(Streams, State) ->
     State#state{
       streams = FinalStreams,
       stream_monitors = FinalStreamMonitors }.
+
+stream_pid(StreamId, State) ->
+    case maps:find(StreamId, State#state.streams) of
+        {ok, StreamPid} ->
+            {StreamPid, State};
+        error ->
+            {ok, NewStreamPid} =
+                quic_streams_sup:start_stream(
+                  State#state.streams_supervisor_pid,
+                  State#state.outflow_pid,
+                  StreamId,
+                  State#state.default_stream_handler,
+                  State#state.default_stream_handler_pid),
+            NewState =
+                register_streams(#{ StreamId => NewStreamPid }, State),
+            {NewStreamPid, NewState}
+    end.
 
 -spec on_inbound_packet(version_negotiation_packet() | inbound_regular_packet(), state())
         -> {noreply, state()} | {stop, stop_reason(), state()}.
@@ -185,9 +216,9 @@ handle_received_frames([Frame | NextFrames], State) ->
 handle_received_frame(Frame, State)
   when is_record(Frame, stream_frame) ->
     StreamId = Frame#stream_frame.stream_id,
-    StreamPid = maps:get(StreamId, State#state.streams),
+    {StreamPid, NewState} = stream_pid(StreamId, State),
     quic_stream:dispatch_inbound_frame(StreamPid, Frame),
-    {noreply, State};
+    {noreply, NewState};
 handle_received_frame(Frame, State)
   when is_record(Frame, ack_frame) ->
     OutflowPid = State#state.outflow_pid,

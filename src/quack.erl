@@ -1,9 +1,9 @@
 -module(quack).
--export([connect/2]).
+-export([connect/4]).
 -export([close/1]).
 
-connect(RemoteEndpoint, RemotePort) ->
-    ConnectionArgs = [self(), RemoteEndpoint, RemotePort],
+connect(RemoteEndpoint, RemotePort, DefaultStreamHandler, DefaultStreamHandlerPid) ->
+    ConnectionArgs = [self(), RemoteEndpoint, RemotePort, DefaultStreamHandler, DefaultStreamHandlerPid],
     {ok, _Connection} = quic_connection_sup:start_connection(ConnectionArgs).
 
 close(Connection) ->

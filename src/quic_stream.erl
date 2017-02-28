@@ -64,9 +64,9 @@
 %% API Function Definitions
 %% ------------------------------------------------------------------
 
-start_link(StreamId, OutflowPid, HandlerModule, HandlerPid) ->
+start_link(OutflowPid, StreamId, HandlerModule, HandlerPid) ->
     gen_server:start_link(?CB_MODULE,
-                          [StreamId, OutflowPid,
+                          [OutflowPid, StreamId,
                            HandlerModule, HandlerPid],
                           []).
 
@@ -88,8 +88,8 @@ dispatch_outbound_value(Pid, OutboundValue, Options) ->
 %% gen_server Function Definitions
 %% ------------------------------------------------------------------
 
-init([StreamId, OutflowPid, HandlerModule, HandlerPid]) ->
-    {ok, DataPacking} = HandlerModule:start_stream(HandlerPid, self()),
+init([OutflowPid, StreamId, HandlerModule, HandlerPid]) ->
+    {ok, DataPacking} = HandlerModule:start_stream(HandlerPid, StreamId, self()),
     InitialState =
         #state{
            stream_id = StreamId,
@@ -177,9 +177,10 @@ is_consumed_value_empty(DataKvs, data_kv) ->
     DataKvs =:= [].
 
 handle_consumed_value(Consumed, State) ->
-    #state{ handler_module = HandlerModule,
+    #state{ stream_id = StreamId,
+            handler_module = HandlerModule,
             handler_pid = HandlerPid } = State,
-    ok = HandlerModule:handle_inbound(HandlerPid, Consumed).
+    ok = HandlerModule:handle_inbound(HandlerPid, StreamId, Consumed).
 
 pack_outbound_value(Data, raw) when is_list(Data); is_binary(Data) ->
     Data;

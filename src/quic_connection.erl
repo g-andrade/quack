@@ -12,7 +12,7 @@
 %% API Function Exports
 %% ------------------------------------------------------------------
 
--export([start_link/4]). -ignore_xref({start_link,4}).
+-export([start_link/6]). -ignore_xref({start_link,6}).
 -export([dispatch_packet/2]).
 -export([notify_readiness/1]).
 
@@ -34,8 +34,8 @@
 %% quic_stream_handler Function Exports (for crypto)
 %% ------------------------------------------------------------------
 
--export([start_stream/2]).
--export([handle_inbound/2]).
+-export([start_stream/3]).
+-export([handle_inbound/3]).
 
 %% ------------------------------------------------------------------
 %% Macro Definitions
@@ -59,6 +59,8 @@
           remote_ip_address :: inet:ip_address(),
           remote_port :: inet:port_number(),
           remote_sni :: iodata(),
+          default_stream_handler :: module(),
+          default_stream_handler_pid :: pid(),
           socket :: inet:socket(),
           crypto_state :: quic_crypto:state(),
           inflow_pid :: pid(),
@@ -74,11 +76,12 @@
 %% API Function Definitions
 %% ------------------------------------------------------------------
 
-start_link(ComponentSupervisorPid, ControllingPid, RemoteHostname, RemotePort) ->
+start_link(ComponentSupervisorPid, ControllingPid, RemoteHostname, RemotePort,
+           DefaultStreamHandler, DefaultStreamHandlerPid) ->
     gen_server:start_link(
       ?CB_MODULE,
       [ComponentSupervisorPid, ControllingPid,
-       RemoteHostname, RemotePort], []).
+       RemoteHostname, RemotePort, DefaultStreamHandler, DefaultStreamHandlerPid], []).
 
 -spec dispatch_packet(pid(), quic_packet()) -> ok.
 dispatch_packet(ConnectionPid, Packet) ->
@@ -97,7 +100,8 @@ close(#{ connection_pid := ConnectionPid }) ->
 %% gen_server Function Definitions
 %% ------------------------------------------------------------------
 
-init([ComponentSupervisorPid, ControllingPid, RemoteHostname, RemotePort]) ->
+init([ComponentSupervisorPid, ControllingPid, RemoteHostname, RemotePort,
+      DefaultStreamHandler, DefaultStreamHandlerPid]) ->
     UdpOpts = [{active, 10},
                {mode, binary}],
     {ok, Socket} = gen_udp:open(0, UdpOpts),
@@ -107,6 +111,8 @@ init([ComponentSupervisorPid, ControllingPid, RemoteHostname, RemotePort]) ->
             controlling_pid_monitor = monitor(process, ControllingPid),
             remote_hostname = RemoteHostname,
             remote_port = RemotePort,
+            default_stream_handler = DefaultStreamHandler,
+            default_stream_handler_pid = DefaultStreamHandlerPid,
             socket = Socket }}.
 
 handle_call(connect, From, State) ->
@@ -176,11 +182,11 @@ code_change(_OldVsn, State, _Extra) ->
 %% quic_stream Function Definitions (for crypto)
 %% ------------------------------------------------------------------
 
-start_stream(HandlerPid, StreamPid) ->
+start_stream(HandlerPid, StreamId, StreamPid) when StreamId =:= ?CRYPTO_STREAM_ID ->
     gen_server:cast(HandlerPid, {start_quic_crypto_stream, StreamPid}),
     {ok, data_kv}.
 
-handle_inbound(HandlerPid, DataKvs) ->
+handle_inbound(HandlerPid, StreamId, DataKvs) when StreamId =:= ?CRYPTO_STREAM_ID ->
     lists:foreach(
       fun (DataKv) ->
               gen_server:cast(HandlerPid, {crypto_stream_inbound, DataKv})
@@ -230,12 +236,15 @@ start_setting_up_connection(Requester,
                                     outflow_pid = undefined } = State,
                             RemoteIpAddress) ->
     SupervisorPid = State#state.component_supervisor_pid,
+    DefaultStreamHandler = State#state.default_stream_handler,
+    DefaultStreamHandlerPid = State#state.default_stream_handler_pid,
     ConnectionId = crypto:rand_uniform(0, 1 bsl 64),
 
     {ok, {InflowPid, OutflowPid}} =
         quic_connection_components_sup:start_remaining_components(
           SupervisorPid, self(), ConnectionId,
-          ?CRYPTO_STREAM_ID, ?MODULE, self()),
+          ?CRYPTO_STREAM_ID, ?MODULE, self(),
+          DefaultStreamHandler, DefaultStreamHandlerPid),
 
     PingInterval = ?DEFAULT_PING_INTERVAL,
     IdleTimeout = PingInterval * 2,

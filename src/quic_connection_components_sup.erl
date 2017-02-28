@@ -7,7 +7,7 @@
 
 -export([start_link/1]).
 -export([get_connection_pid/1]).
--export([start_remaining_components/6]).
+-export([start_remaining_components/8]).
 
 %% ------------------------------------------------------------------
 %% supervisor Function Exports
@@ -33,17 +33,24 @@ get_connection_pid(SupervisorPid) ->
     {_Id, Pid, _Type, _Modules} = lists:keyfind(quic_connection, 1, AllChildren),
     Pid.
 
-start_remaining_components(SupervisorPid, ConnectionPid, ConnectionId, CryptoStreamId,
-                           CryptoModule, CryptoPid) ->
-    OutflowChild = ?CHILD(quic_outflow, worker, [ConnectionPid, ConnectionId]),
+start_remaining_components(SupervisorPid, ConnectionPid, ConnectionId,
+                           CryptoStreamId, CryptoStreamHandler, CryptoStreamHandlerPid,
+                           DefaultStreamHandler, DefaultStreamHandlerPid) ->
+    StreamsSupervisorChild =
+        ?CHILD(quic_streams_sup, supervisor, []),
+    {ok, StreamsSupervisorPid} = supervisor:start_child(SupervisorPid, StreamsSupervisorChild),
+
+    OutflowChild =
+        ?CHILD(quic_outflow, worker, [ConnectionPid, ConnectionId]),
     {ok, OutflowPid} = supervisor:start_child(SupervisorPid, OutflowChild),
 
-    CryptoStreamChild = ?CHILD(quic_stream, worker, [CryptoStreamId, OutflowPid,
-                                                     CryptoModule, CryptoPid]),
-    {ok, CryptoStreamPid} = supervisor:start_child(SupervisorPid, CryptoStreamChild),
+    {ok, CryptoStreamPid} =
+       quic_streams_sup:start_stream(StreamsSupervisorPid, OutflowPid,
+                                     CryptoStreamId, CryptoStreamHandler, CryptoStreamHandlerPid),
 
     InflowInitialStreams = #{CryptoStreamId => CryptoStreamPid},
-    InflowChild = ?CHILD(quic_inflow, worker, [OutflowPid, InflowInitialStreams]),
+    InflowChild = ?CHILD(quic_inflow, worker, [StreamsSupervisorPid, OutflowPid, InflowInitialStreams,
+                                               DefaultStreamHandler, DefaultStreamHandlerPid]),
     {ok, InflowPid} = supervisor:start_child(SupervisorPid, InflowChild),
 
     {ok, {InflowPid, OutflowPid}}.
