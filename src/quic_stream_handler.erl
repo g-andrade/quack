@@ -13,5 +13,5 @@
 %% ------------------------------------------------------------------
 
 -callback start_instream(HandlerPid :: pid(), StreamId :: stream_id(), InstreamPid :: pid()) -> {ok, DataPacking :: data_packing()}.
--callback start_outstream(HandlerPid :: pid(), StreamId :: stream_id(), Outstreampid :: pid()) -> {ok, DataPacking :: data_packing()}.
+-callback start_outstream(HandlerPid :: pid(), StreamId :: stream_id(), OutstreamPid :: pid()) -> {ok, DataPacking :: data_packing()}.
 -callback handle_inbound(HandlerPid :: pid(), StreamId :: stream_id(), Value :: term()) -> ok.
