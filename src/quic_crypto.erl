@@ -12,7 +12,7 @@
 %% ------------------------------------------------------------------
 
 -export([initial_state/2]).
--export([start_stream/2]).
+-export([start_outstream/2]).
 -export([handle_stream_inbound/2]).
 -export([maybe_diversify/2]).
 -export([decrypt_packet_payload/4]).
@@ -45,14 +45,14 @@
 -record(plain_encryption, {
           connection_id :: connection_id(),
           idle_timeout :: non_neg_integer(), % in seconds
-          stream_pid :: pid()
+          outstream_pid :: pid()
          }).
 -type plain_encryption() :: #plain_encryption{}.
 
 -record(initial_encryption, {
           connection_id :: connection_id(),
           idle_timeout :: non_neg_integer(), % in seconds
-          stream_pid :: pid(),
+          outstream_pid :: pid(),
           keys :: keys(),
           aead_algorithm :: known_aead_algorithm(),
           have_encrypted_packets_been_received :: boolean(),
@@ -64,7 +64,7 @@
 -record(forward_secure_encryption, {
           connection_id :: connection_id(),
           idle_timeout :: non_neg_integer(), % in seconds
-          stream_pid :: pid(),
+          outstream_pid :: pid(),
           keys :: keys(),
           aead_algorithm :: known_aead_algorithm()
          }).
@@ -152,22 +152,22 @@ initial_state(ConnectionId, IdleTimeout) ->
     #unstarted{ connection_id = ConnectionId,
                 idle_timeout = IdleTimeout }.
 
-start_stream(StreamPid, #unstarted{} = State) ->
+start_outstream(OutstreamPid, #unstarted{} = State) ->
     ConnectionId = State#unstarted.connection_id,
     IdleTimeout = State#unstarted.idle_timeout,
     InchoateDataKv = inchoate_data_kv(),
     PacketOptions = [{headers, [{version, ?QUIC_VERSION}]}],
-    quic_stream:dispatch_outbound_value(StreamPid, InchoateDataKv, PacketOptions),
+    quic_outstream:dispatch_value(OutstreamPid, InchoateDataKv, PacketOptions),
     #plain_encryption{ connection_id = ConnectionId,
                        idle_timeout = IdleTimeout,
-                       stream_pid = StreamPid }.
+                       outstream_pid = OutstreamPid }.
 
 handle_stream_inbound(DataKv, #plain_encryption{} = State)
   when DataKv#data_kv.tag =:= <<"REJ">> ->
     lager:debug("processing server rej"),
     ServerRej = decode_server_rej(DataKv),
-    StreamPid = State#plain_encryption.stream_pid,
-    on_server_rej(ServerRej, StreamPid, State);
+    OutstreamPid = State#plain_encryption.outstream_pid,
+    on_server_rej(ServerRej, OutstreamPid, State);
 handle_stream_inbound(DataKv, #initial_encryption{} = State)
   when DataKv#data_kv.tag =:= <<"SHLO">> ->
     lager:debug("processing server hello"),
@@ -467,7 +467,7 @@ on_server_hello(#data_kv{ tag = <<"SHLO">>,
 %% server REJ
 %% ------------------------------------------------------------------
 
-on_server_rej(ServerRej, StreamPid, PlainEncryption) ->
+on_server_rej(ServerRej, OutstreamPid, PlainEncryption) ->
     ConnectionId = PlainEncryption#plain_encryption.connection_id,
     IdleTimeout = PlainEncryption#plain_encryption.idle_timeout,
     ServerCfg = ServerRej#server_rej.server_cfg,
@@ -502,7 +502,7 @@ on_server_rej(ServerRej, StreamPid, PlainEncryption) ->
            encoded_leaf_certificate = EncodedLeafCertificate },
 
     PacketOptions = [{crypto_state, PlainEncryption}],
-    quic_stream:dispatch_outbound_value(StreamPid, {raw, EncodedChloDataKv}, PacketOptions),
+    quic_outstream:dispatch_value(OutstreamPid, {raw, EncodedChloDataKv}, PacketOptions),
     initial_encryption(ConnectionId, IdleTimeout, PickedAeadAlgorithm, InitialEncryptionParams).
 
 -spec decode_server_rej(data_kv()) -> server_rej().

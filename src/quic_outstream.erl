@@ -1,4 +1,4 @@
--module(quic_stream).
+-module(quic_outstream).
 -behaviour(gen_server).
 
 -include("quic_data_kv.hrl").
@@ -9,9 +9,8 @@
 %% ------------------------------------------------------------------
 
 -export([start_link/4]). -ignore_xref({start_link, 4}).
--export([dispatch_inbound_frame/2]).
--export([dispatch_outbound_value/2]).
--export([dispatch_outbound_value/3]).
+-export([dispatch_value/2]).
+-export([dispatch_value/3]).
 
 %% ------------------------------------------------------------------
 %% gen_server Function Exports
@@ -36,12 +35,11 @@
 
 -record(state, {
           stream_id :: stream_id(),
-          data_packing :: data_packing(),
+          data_packing :: quic_stream_handler:data_packing(),
           outflow_pid :: pid(),
           outflow_monitor :: reference(),
           handler_module :: module(),
           handler_pid :: pid(),
-          instream_window :: quic_instream_window:window(),
           outstream_offset :: non_neg_integer()
          }).
 -type state() :: #state{}.
@@ -49,13 +47,6 @@
 
 -type dispatch_option() :: quic_outflow:packet_option().
 -export_type([dispatch_option/0]).
-
-%% ------------------------------------------------------------------
-%% Type Definitions
-%% ------------------------------------------------------------------
-
--type data_packing() :: raw | data_kv.
--export_type([data_packing/0]).
 
 -type outbound_value() :: iodata() | data_kv() | {raw, iodata()}.
 
@@ -70,18 +61,14 @@ start_link(OutflowPid, StreamId, HandlerModule, HandlerPid) ->
                            HandlerModule, HandlerPid],
                           []).
 
--spec dispatch_inbound_frame(Pid :: pid(), Frame :: stream_frame() | stream_fin_frame()) -> ok.
-dispatch_inbound_frame(Pid, Frame) ->
-    gen_server:cast(Pid, {inbound_frame, Frame}).
+-spec dispatch_value(Pid :: pid(), OutboundValue :: outbound_value()) -> ok.
+dispatch_value(Pid, OutboundValue) ->
+    dispatch_value(Pid, OutboundValue, []).
 
--spec dispatch_outbound_value(Pid :: pid(), OutboundValue :: outbound_value()) -> ok.
-dispatch_outbound_value(Pid, OutboundValue) ->
-    dispatch_outbound_value(Pid, OutboundValue, []).
-
--spec dispatch_outbound_value(
+-spec dispatch_value(
         Pid :: pid(), OutboundValue :: outbound_value(),
         Options :: [dispatch_option()]) -> ok.
-dispatch_outbound_value(Pid, OutboundValue, Options) ->
+dispatch_value(Pid, OutboundValue, Options) ->
     gen_server:cast(Pid, {outbound_value, OutboundValue, Options}).
 
 %% ------------------------------------------------------------------
@@ -89,7 +76,7 @@ dispatch_outbound_value(Pid, OutboundValue, Options) ->
 %% ------------------------------------------------------------------
 
 init([OutflowPid, StreamId, HandlerModule, HandlerPid]) ->
-    {ok, DataPacking} = HandlerModule:start_stream(HandlerPid, StreamId, self()),
+    {ok, DataPacking} = HandlerModule:start_outstream(HandlerPid, StreamId, self()),
     InitialState =
         #state{
            stream_id = StreamId,
@@ -98,7 +85,6 @@ init([OutflowPid, StreamId, HandlerModule, HandlerPid]) ->
            outflow_monitor = monitor(process, OutflowPid),
            handler_module = HandlerModule,
            handler_pid = HandlerPid,
-           instream_window = new_instream_window(DataPacking),
            outstream_offset = 0
           },
     {ok, InitialState}.
@@ -108,14 +94,6 @@ handle_call(Request, From, State) ->
                 [Request, From, State]),
     {noreply, State}.
 
-handle_cast({inbound_frame, #stream_frame{} = Frame}, State) ->
-    #stream_frame{ offset = Offset,
-                   data_payload = Data } = Frame,
-    StateB = insert_into_instream_window(Offset, Data, State),
-    {ConsumedValue, StateC} = consume_instream_window_value(StateB),
-    (is_consumed_value_empty(ConsumedValue, StateC#state.data_packing)
-     orelse handle_consumed_value(ConsumedValue, StateC)),
-    {noreply, StateC};
 handle_cast({outbound_value, OutboundValue, Options}, State) ->
     Data = pack_outbound_value(OutboundValue, State#state.data_packing),
     DataSize = iolist_size(Data),
@@ -128,7 +106,10 @@ handle_cast({outbound_value, OutboundValue, Options}, State) ->
                offset = Offset,
                data_payload = Data },
     quic_outflow:dispatch_frame(State#state.outflow_pid, Frame, Options),
-    {noreply, NewState}.
+    {noreply, NewState};
+handle_cast(Msg, State) ->
+    lager:debug("unhandled cast ~p on state ~p", [Msg, State]),
+    {noreply, State}.
 
 handle_info({'DOWN', Reference, process, _Pid, _Reason}, State)
   when Reference =:= State#state.outflow_monitor ->
@@ -146,41 +127,6 @@ code_change(_OldVsn, State, _Extra) ->
 %% ------------------------------------------------------------------
 %% Internal Function Definitions
 %% ------------------------------------------------------------------
-
-new_instream_window(raw) ->
-    quic_instream_window_unordered_data:new();
-new_instream_window(data_kv) ->
-    DataInstream = quic_instream_window_unordered_data:new(),
-    quic_instream_window_data_kv:new(DataInstream).
-
-insert_into_instream_window(Offset, Data, State) ->
-    Instream = State#state.instream_window,
-    case quic_instream_window:insert(Instream, Offset, Data) of
-        {ok, NewInstream} ->
-            State#state{ instream_window = NewInstream };
-        {error, stale_data} ->
-            lager:debug("got outdated data for stream ~p, offset ~p, with length ~p",
-                        [State#state.stream_id, Offset, iolist_size(Data)]),
-            State
-    end.
-
-consume_instream_window_value(State) ->
-    Instream = State#state.instream_window,
-    {NewInstream, ConsumedValue} = quic_instream_window:consume(Instream),
-    {ConsumedValue, State#state{ instream_window = NewInstream }}.
-
--spec is_consumed_value_empty(iodata() | data_kv(), data_packing())
-        -> boolean().
-is_consumed_value_empty(Data, raw) ->
-    iolist_size(Data) < 1;
-is_consumed_value_empty(DataKvs, data_kv) ->
-    DataKvs =:= [].
-
-handle_consumed_value(Consumed, State) ->
-    #state{ stream_id = StreamId,
-            handler_module = HandlerModule,
-            handler_pid = HandlerPid } = State,
-    ok = HandlerModule:handle_inbound(HandlerPid, StreamId, Consumed).
 
 pack_outbound_value(Data, raw) when is_list(Data); is_binary(Data) ->
     Data;

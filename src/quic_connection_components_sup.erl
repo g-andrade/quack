@@ -36,20 +36,28 @@ get_connection_pid(SupervisorPid) ->
 start_remaining_components(SupervisorPid, ConnectionPid, ConnectionId,
                            CryptoStreamId, CryptoStreamHandler, CryptoStreamHandlerPid,
                            DefaultStreamHandler, DefaultStreamHandlerPid) ->
-    StreamsSupervisorChild =
-        ?CHILD(quic_streams_sup, supervisor, []),
-    {ok, StreamsSupervisorPid} = supervisor:start_child(SupervisorPid, StreamsSupervisorChild),
+    InstreamsSupervisorChild =
+        ?CHILD(quic_instreams_sup, supervisor, []),
+    {ok, InstreamsSupervisorPid} = supervisor:start_child(SupervisorPid, InstreamsSupervisorChild),
 
     OutflowChild =
         ?CHILD(quic_outflow, worker, [ConnectionPid, ConnectionId]),
     {ok, OutflowPid} = supervisor:start_child(SupervisorPid, OutflowChild),
 
-    {ok, CryptoStreamPid} =
-       quic_streams_sup:start_stream(StreamsSupervisorPid, OutflowPid,
-                                     CryptoStreamId, CryptoStreamHandler, CryptoStreamHandlerPid),
+    OutstreamsSupervisorChild =
+        ?CHILD(quic_outstreams_sup, supervisor, []),
+    {ok, OutstreamsSupervisorPid} = supervisor:start_child(SupervisorPid, OutstreamsSupervisorChild),
 
-    InflowInitialStreams = #{CryptoStreamId => CryptoStreamPid},
-    InflowChild = ?CHILD(quic_inflow, worker, [StreamsSupervisorPid, OutflowPid, InflowInitialStreams,
+    {ok, CryptoInstreamPid} =
+       quic_instreams_sup:start_instream(InstreamsSupervisorPid,
+                                         CryptoStreamId, CryptoStreamHandler, CryptoStreamHandlerPid),
+
+    {ok, _CryptoOutstreamPid} =
+       quic_outstreams_sup:start_outstream(OutstreamsSupervisorPid, OutflowPid,
+                                           CryptoStreamId, CryptoStreamHandler, CryptoStreamHandlerPid),
+
+    InflowInitialInstreams = #{CryptoStreamId => CryptoInstreamPid},
+    InflowChild = ?CHILD(quic_inflow, worker, [InstreamsSupervisorPid, OutflowPid, InflowInitialInstreams,
                                                DefaultStreamHandler, DefaultStreamHandlerPid]),
     {ok, InflowPid} = supervisor:start_child(SupervisorPid, InflowChild),
 

@@ -34,7 +34,8 @@
 %% quic_stream_handler Function Exports (for crypto)
 %% ------------------------------------------------------------------
 
--export([start_stream/3]).
+-export([start_instream/3]).
+-export([start_outstream/3]).
 -export([handle_inbound/3]).
 
 %% ------------------------------------------------------------------
@@ -127,8 +128,8 @@ handle_call(Request, From, State) ->
 handle_cast({dispatch_packet, QuicPacket}, State) ->
     send_packet(QuicPacket, State),
     {noreply, State};
-handle_cast({start_quic_crypto_stream, StreamPid}, #state{ crypto_state = CryptoState } = State) ->
-    NewCryptoState = quic_crypto:start_stream(StreamPid, CryptoState),
+handle_cast({start_quic_crypto_outstream, OutstreamPid}, #state{ crypto_state = CryptoState } = State) ->
+    NewCryptoState = quic_crypto:start_outstream(OutstreamPid, CryptoState),
     {noreply, State#state{ crypto_state = NewCryptoState }};
 handle_cast({crypto_stream_inbound, DataKv}, #state{ crypto_state = CryptoState } = State) ->
     NewCryptoState = quic_crypto:handle_stream_inbound(DataKv, CryptoState),
@@ -179,11 +180,14 @@ code_change(_OldVsn, State, _Extra) ->
     {ok, State}.
 
 %% ------------------------------------------------------------------
-%% quic_stream Function Definitions (for crypto)
+%% quic_stream_handler Function Definitions (for crypto)
 %% ------------------------------------------------------------------
 
-start_stream(HandlerPid, StreamId, StreamPid) when StreamId =:= ?CRYPTO_STREAM_ID ->
-    gen_server:cast(HandlerPid, {start_quic_crypto_stream, StreamPid}),
+start_instream(_HandlerPid, StreamId, _InstreamPid) when StreamId =:= ?CRYPTO_STREAM_ID ->
+    {ok, data_kv}.
+
+start_outstream(HandlerPid, StreamId, OutstreamPid) when StreamId =:= ?CRYPTO_STREAM_ID ->
+    gen_server:cast(HandlerPid, {start_quic_crypto_outstream, OutstreamPid}),
     {ok, data_kv}.
 
 handle_inbound(HandlerPid, StreamId, DataKvs) when StreamId =:= ?CRYPTO_STREAM_ID ->

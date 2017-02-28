@@ -1,4 +1,4 @@
--module(quic_streams_sup).
+-module(quic_instreams_sup).
 -behaviour(supervisor).
 
 %% ------------------------------------------------------------------
@@ -6,7 +6,7 @@
 %% ------------------------------------------------------------------
 
 -export([start_link/0]).
--export([start_stream/5]).
+-export([start_instream/4]).
 
 %% ------------------------------------------------------------------
 %% supervisor Function Exports
@@ -27,13 +27,13 @@
 start_link() ->
     supervisor:start_link(?MODULE, []).
 
-start_stream(SupervisorPid, OutflowPid, StreamId, StreamHandler, StreamHandlerPid) ->
-    supervisor:start_child(SupervisorPid, [OutflowPid, StreamId, StreamHandler, StreamHandlerPid]).
+start_instream(SupervisorPid, StreamId, StreamHandler, StreamHandlerPid) ->
+    supervisor:start_child(SupervisorPid, [StreamId, StreamHandler, StreamHandlerPid]).
 
 %% ------------------------------------------------------------------
 %% supervisor Function Definitions
 %% ------------------------------------------------------------------
 
 init([]) ->
-    StreamChild = ?CHILD(quic_stream, worker),
+    StreamChild = ?CHILD(quic_instream, worker),
     {ok, {{simple_one_for_one, 10, 1}, [StreamChild]}}.

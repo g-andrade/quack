@@ -1,6 +1,17 @@
 -module(quic_stream_handler).
 -include("quic_frame.hrl").
 
--callback start_stream(HandlerPid :: pid(), StreamId :: stream_id(), StreamPid :: pid()) -> {ok, DataPacking :: quic_stream:data_packing()}.
+%% ------------------------------------------------------------------
+%% Type Definitions
+%% ------------------------------------------------------------------
 
+-type data_packing() :: raw | data_kv.
+-export_type([data_packing/0]).
+
+%% ------------------------------------------------------------------
+%% Callbacks
+%% ------------------------------------------------------------------
+
+-callback start_instream(HandlerPid :: pid(), StreamId :: stream_id(), InstreamPid :: pid()) -> {ok, DataPacking :: data_packing()}.
+-callback start_outstream(HandlerPid :: pid(), StreamId :: stream_id(), Outstreampid :: pid()) -> {ok, DataPacking :: data_packing()}.
 -callback handle_inbound(HandlerPid :: pid(), StreamId :: stream_id(), Value :: term()) -> ok.
