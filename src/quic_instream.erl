@@ -63,6 +63,15 @@ dispatch_frame(Pid, Frame) ->
 %% ------------------------------------------------------------------
 
 init([StreamId, HandlerModule, HandlerPid]) ->
+    gen_server:cast(self(), {initialize, StreamId, HandlerModule, HandlerPid}),
+    {ok, uninitialized}.
+
+handle_call(Request, From, State) when State =/= uninitialized ->
+    lager:debug("unhandled call ~p from ~p on state ~p",
+                [Request, From, State]),
+    {noreply, State}.
+
+handle_cast({initialize, StreamId, HandlerModule, HandlerPid}, uninitialized) ->
     {ok, DataPacking} = HandlerModule:start_instream(HandlerPid, StreamId, self()),
     InitialState =
         #state{
@@ -72,13 +81,7 @@ init([StreamId, HandlerModule, HandlerPid]) ->
            handler_pid = HandlerPid,
            instream_window = new_instream_window(DataPacking)
           },
-    {ok, InitialState}.
-
-handle_call(Request, From, State) ->
-    lager:debug("unhandled call ~p from ~p on state ~p",
-                [Request, From, State]),
-    {noreply, State}.
-
+    {noreply, InitialState};
 handle_cast({inbound_frame, #stream_frame{} = Frame}, State) ->
     #stream_frame{ offset = Offset,
                    data_payload = Data } = Frame,
@@ -87,11 +90,11 @@ handle_cast({inbound_frame, #stream_frame{} = Frame}, State) ->
     (is_consumed_value_empty(ConsumedValue, StateC#state.data_packing)
      orelse handle_consumed_value(ConsumedValue, StateC)),
     {noreply, StateC};
-handle_cast(Msg, State) ->
+handle_cast(Msg, State) when State =/= uninitialized ->
     lager:debug("unhandled cast ~p on state ~p", [Msg, State]),
     {noreply, State}.
 
-handle_info(Info, State) ->
+handle_info(Info, State) when State =/= uninitialized ->
     lager:debug("unhandled info ~p on state ~p", [Info, State]),
     {noreply, State}.
 
