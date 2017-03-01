@@ -11,7 +11,7 @@
 %% API Function Exports
 %% ------------------------------------------------------------------
 
--export([initial_state/2]).
+-export([initial_state/3]).
 -export([start_outstream/2]).
 -export([handle_stream_inbound/2]).
 -export([maybe_diversify/2]).
@@ -37,12 +37,14 @@
 -export_type([state/0]).
 
 -record(unstarted, {
+          remote_sni :: iodata(),
           connection_id :: connection_id(),
           idle_timeout :: non_neg_integer() % in seconds
          }).
 -type unstarted() :: #unstarted{}.
 
 -record(plain_encryption, {
+          remote_sni :: iodata(),
           connection_id :: connection_id(),
           idle_timeout :: non_neg_integer(), % in seconds
           outstream_pid :: pid()
@@ -50,6 +52,7 @@
 -type plain_encryption() :: #plain_encryption{}.
 
 -record(initial_encryption, {
+          remote_sni :: iodata(),
           connection_id :: connection_id(),
           idle_timeout :: non_neg_integer(), % in seconds
           outstream_pid :: pid(),
@@ -62,6 +65,7 @@
 -type initial_encryption() :: #initial_encryption{}.
 
 -record(forward_secure_encryption, {
+          remote_sni :: iodata(),
           connection_id :: connection_id(),
           idle_timeout :: non_neg_integer(), % in seconds
           outstream_pid :: pid(),
@@ -148,17 +152,20 @@
 %% API Function Definitions
 %% ------------------------------------------------------------------
 
-initial_state(ConnectionId, IdleTimeout) ->
-    #unstarted{ connection_id = ConnectionId,
+initial_state(RemoteSNI, ConnectionId, IdleTimeout) ->
+    #unstarted{ remote_sni = RemoteSNI,
+                connection_id = ConnectionId,
                 idle_timeout = IdleTimeout }.
 
 start_outstream(OutstreamPid, #unstarted{} = State) ->
+    RemoteSNI = State#unstarted.remote_sni,
     ConnectionId = State#unstarted.connection_id,
     IdleTimeout = State#unstarted.idle_timeout,
-    InchoateDataKv = inchoate_data_kv(),
+    InchoateDataKv = inchoate_data_kv(RemoteSNI),
     PacketOptions = [{headers, [{version, ?QUIC_VERSION}]}],
     quic_outstream:dispatch_value(OutstreamPid, InchoateDataKv, PacketOptions),
-    #plain_encryption{ connection_id = ConnectionId,
+    #plain_encryption{ remote_sni = RemoteSNI,
+                       connection_id = ConnectionId,
                        idle_timeout = IdleTimeout,
                        outstream_pid = OutstreamPid }.
 
@@ -279,7 +286,7 @@ packet_encryption_overhead(#forward_secure_encryption{ aead_algorithm = AeadAlgo
 %% Initial encryption
 %% ------------------------------------------------------------------
 
-initial_encryption(ConnectionId, IdleTimeout, AeadAlgorithm, InitialEncryptionParams) ->
+initial_encryption(RemoteSNI, ConnectionId, IdleTimeout, AeadAlgorithm, InitialEncryptionParams) ->
     #initial_encryption_params{
        server_nonce = ServerNonce,
        client_nonce = ClientNonce,
@@ -324,6 +331,7 @@ initial_encryption(ConnectionId, IdleTimeout, AeadAlgorithm, InitialEncryptionPa
               server_iv = ServerIv },
 
     #initial_encryption{
+       remote_sni = RemoteSNI,
        connection_id = ConnectionId,
        idle_timeout = IdleTimeout,
        keys = Keys,
@@ -341,10 +349,10 @@ initial_encryption(ConnectionId, IdleTimeout, AeadAlgorithm, InitialEncryptionPa
 %% inchoate
 %% ------------------------------------------------------------------
 
-inchoate_data_kv() ->
+inchoate_data_kv(RemoteSNI) ->
     % @TODO: actually scale accordingly (min CHLO size is 1024, apparently?)
     TaggedValues = #{"PAD" => [0 || _ <- lists:seq(1, 1024)],
-                     "SNI" => "www.example.com",
+                     "SNI" => RemoteSNI,
                      "VER" => ?QUIC_VERSION,
                      "PDMD" => "X509"},
 
@@ -355,7 +363,7 @@ inchoate_data_kv() ->
 %% chlo
 %% ------------------------------------------------------------------
 
-chlo_data_kv(IdleTimeout, ServerRej, PickedKeyExchangeAlgorithm, ClientNonce, ClientPublicKey) ->
+chlo_data_kv(RemoteSNI, IdleTimeout, ServerRej, PickedKeyExchangeAlgorithm, ClientNonce, ClientPublicKey) ->
     #server_rej{ server_cfg = (#server_cfg{} = ServerCfg) } = ServerRej,
 
     PickedAeadAlgorithm =
@@ -369,7 +377,7 @@ chlo_data_kv(IdleTimeout, ServerRej, PickedKeyExchangeAlgorithm, ClientNonce, Cl
 
     % @TODO: actually scale accordingly (min CHLO size is 1024, apparently?)
     TaggedValues = #{"PAD" => [0 || _ <- lists:seq(1, 800)],
-                     "SNI" => "www.example.com",
+                     "SNI" => RemoteSNI,
                      "VER" => ?QUIC_VERSION,
                      "PDMD" => "X509",
                      "SCID" => ServerCfg#server_cfg.config_id,
@@ -406,6 +414,7 @@ on_server_hello(#data_kv{ tag = <<"SHLO">>,
                 #initial_encryption{} = State) ->
 
     #initial_encryption{
+       remote_sni = RemoteSNI,
        connection_id = ConnectionId,
        idle_timeout = IdleTimeout,
        aead_algorithm = AeadAlgorithm,
@@ -458,6 +467,7 @@ on_server_hello(#data_kv{ tag = <<"SHLO">>,
 
     quic_connection:notify_readiness(self()),
     #forward_secure_encryption{
+       remote_sni = RemoteSNI,
        connection_id = ConnectionId,
        idle_timeout = IdleTimeout,
        keys = NewKeys,
@@ -468,6 +478,7 @@ on_server_hello(#data_kv{ tag = <<"SHLO">>,
 %% ------------------------------------------------------------------
 
 on_server_rej(ServerRej, OutstreamPid, PlainEncryption) ->
+    RemoteSNI = PlainEncryption#plain_encryption.remote_sni,
     ConnectionId = PlainEncryption#plain_encryption.connection_id,
     IdleTimeout = PlainEncryption#plain_encryption.idle_timeout,
     ServerCfg = ServerRej#server_rej.server_cfg,
@@ -486,7 +497,7 @@ on_server_rej(ServerRej, OutstreamPid, PlainEncryption) ->
     LeafCertificate = hd(ServerRej#server_rej.certificate_chain),
     EncodedLeafCertificate = public_key:pkix_encode('Certificate', LeafCertificate, plain),
 
-    ChloDataKv = chlo_data_kv(IdleTimeout, ServerRej, PickedKeyExchangeAlgorithm, ClientNonce, ClientPublicKey),
+    ChloDataKv = chlo_data_kv(RemoteSNI, IdleTimeout, ServerRej, PickedKeyExchangeAlgorithm, ClientNonce, ClientPublicKey),
     EncodedChloDataKv = quic_data_kv:encode(ChloDataKv),
 
     InitialEncryptionParams =
@@ -503,7 +514,7 @@ on_server_rej(ServerRej, OutstreamPid, PlainEncryption) ->
 
     PacketOptions = [{crypto_state, PlainEncryption}],
     quic_outstream:dispatch_value(OutstreamPid, {raw, EncodedChloDataKv}, PacketOptions),
-    initial_encryption(ConnectionId, IdleTimeout, PickedAeadAlgorithm, InitialEncryptionParams).
+    initial_encryption(RemoteSNI, ConnectionId, IdleTimeout, PickedAeadAlgorithm, InitialEncryptionParams).
 
 -spec decode_server_rej(data_kv()) -> server_rej().
 decode_server_rej(#data_kv{ tag = <<"REJ">>,

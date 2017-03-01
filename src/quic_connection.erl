@@ -252,11 +252,12 @@ start_setting_up_connection(Requester,
           ?CRYPTO_STREAM_ID, ?MODULE, self(),
           DefaultStreamHandler, DefaultStreamHandlerPid),
 
+    RemoteSNI = State#state.remote_hostname, % TODO convert if it's an IP address
     PingInterval = ?DEFAULT_PING_INTERVAL,
     IdleTimeout = PingInterval * 2,
     State#state{ requester = Requester,
                  remote_ip_address = RemoteIpAddress,
-                 crypto_state = quic_crypto:initial_state(ConnectionId, IdleTimeout),
+                 crypto_state = quic_crypto:initial_state(RemoteSNI, ConnectionId, IdleTimeout),
                  inflow_pid = InflowPid,
                  inflow_monitor = monitor(process, InflowPid),
                  outflow_pid = OutflowPid,
