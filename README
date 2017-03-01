@@ -13,3 +13,4 @@ Progress:
 * Outbound packets are automatically padded as necessary to fill the target IPv4 MTU (1350 bytes)
 * Initial connection can be established
 * Crypto stream is opened, key diversification is handled, forward-secure parameters are negotiated (curve25519 / AES GCM)
+* Basic HTTP-over-QUIC requests working partially
