@@ -68,6 +68,7 @@
           inflow_monitor :: reference(),
           outflow_pid :: pid(),
           outflow_monitor :: reference(),
+          outstreams_supervisor_pid :: pid(),
           ping_timer :: undefined | reference(),
           ping_interval :: non_neg_integer() % in seconds
          }).
@@ -94,7 +95,7 @@ notify_readiness(ConnectionPid) ->
 connect(ConnectionPid) ->
     gen_server:call(ConnectionPid, connect).
 
-close(#{ connection_pid := ConnectionPid }) ->
+close(ConnectionPid) ->
     gen_server:call(ConnectionPid, close).
 
 %% ------------------------------------------------------------------
@@ -136,7 +137,12 @@ handle_cast({crypto_stream_inbound, DataKv}, #state{ crypto_state = CryptoState 
     NewCryptoState = quic_crypto:handle_stream_inbound(DataKv, CryptoState),
     {noreply, State#state{ crypto_state = NewCryptoState }};
 handle_cast(notify_readiness, State) ->
-    Connection = #{ connection_pid => self() },
+    Connection =
+        #{ connection_pid => self(),
+           outflow_pid => State#state.outflow_pid,
+           outstreams_supervisor_pid => State#state.outstreams_supervisor_pid,
+           default_stream_handler => State#state.default_stream_handler,
+           default_stream_handler_pid => State#state.default_stream_handler_pid },
     gen_server:reply(State#state.requester, {ok, Connection}),
     #state{ ping_interval = PingInterval } = State,
     PingTimer = erlang:send_after(timer:seconds(PingInterval), self(), send_ping),
@@ -246,7 +252,7 @@ start_setting_up_connection(Requester,
     DefaultStreamHandlerPid = State#state.default_stream_handler_pid,
     ConnectionId = crypto:rand_uniform(0, 1 bsl 64),
 
-    {ok, {InflowPid, OutflowPid}} =
+    {ok, {InflowPid, OutflowPid, OutstreamsSupervisorPid}} =
         quic_connection_components_sup:start_remaining_components(
           SupervisorPid, self(), ConnectionId,
           ?CRYPTO_STREAM_ID, ?MODULE, self(),
@@ -262,6 +268,7 @@ start_setting_up_connection(Requester,
                  inflow_monitor = monitor(process, InflowPid),
                  outflow_pid = OutflowPid,
                  outflow_monitor = monitor(process, OutflowPid),
+                 outstreams_supervisor_pid = OutstreamsSupervisorPid,
                  ping_interval = PingInterval }.
 
 close_connection(#state{ outflow_pid = OutflowPid }) ->

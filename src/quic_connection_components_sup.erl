@@ -61,7 +61,7 @@ start_remaining_components(SupervisorPid, ConnectionPid, ConnectionId,
                                                DefaultStreamHandler, DefaultStreamHandlerPid]),
     {ok, InflowPid} = supervisor:start_child(SupervisorPid, InflowChild),
 
-    {ok, {InflowPid, OutflowPid}}.
+    {ok, {InflowPid, OutflowPid, OutstreamsSupervisorPid}}.
 
 %% ------------------------------------------------------------------
 %% supervisor Function Definitions
