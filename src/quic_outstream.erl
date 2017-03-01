@@ -48,7 +48,9 @@
 -type dispatch_option() :: quic_outflow:packet_option().
 -export_type([dispatch_option/0]).
 
--type outbound_value() :: iodata() | data_kv() | {raw, iodata()}.
+-type http_frame() :: h2_frame:frame().
+
+-type outbound_value() :: iodata() | data_kv() | {raw, iodata()} | [http_frame()].
 
 
 %% ------------------------------------------------------------------
@@ -136,4 +138,6 @@ pack_outbound_value(Data, raw) when is_list(Data); is_binary(Data) ->
 pack_outbound_value(#data_kv{} = DataKv, data_kv) ->
     quic_data_kv:encode(DataKv);
 pack_outbound_value({raw, Data}, data_kv) when is_list(Data); is_binary(Data) ->
-    Data.
+    Data;
+pack_outbound_value(HttpFrame, http) ->
+    h2_frame:to_binary(HttpFrame).

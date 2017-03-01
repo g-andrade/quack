@@ -5,7 +5,7 @@
 %% Type Definitions
 %% ------------------------------------------------------------------
 
--type data_packing() :: raw | data_kv.
+-type data_packing() :: raw | data_kv | http.
 -export_type([data_packing/0]).
 
 %% ------------------------------------------------------------------

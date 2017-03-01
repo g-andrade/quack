@@ -112,7 +112,10 @@ new_instream_window(raw) ->
     quic_instream_window_unordered_data:new();
 new_instream_window(data_kv) ->
     DataInstream = quic_instream_window_unordered_data:new(),
-    quic_instream_window_data_kv:new(DataInstream).
+    quic_instream_window_data_kv:new(DataInstream);
+new_instream_window(http) ->
+    DataInstream = quic_instream_window_unordered_data:new(),
+    quic_instream_window_http:new(DataInstream).
 
 insert_into_instream_window(Offset, Data, State) ->
     Instream = State#state.instream_window,
@@ -131,12 +134,14 @@ consume_instream_window_value(State) ->
     NewState = State#state{ instream_window = NewInstream },
     {NewState, ConsumedValue}.
 
--spec is_consumed_value_empty(iodata() | data_kv(), quic_stream_handler:data_packing())
+-spec is_consumed_value_empty(iodata() | [data_kv()] | [h2_frame:frame()], quic_stream_handler:data_packing())
         -> boolean().
 is_consumed_value_empty(Data, raw) ->
     iolist_size(Data) < 1;
 is_consumed_value_empty(DataKvs, data_kv) ->
-    DataKvs =:= [].
+    DataKvs =:= [];
+is_consumed_value_empty(HttpFrames, http) ->
+    HttpFrames =:= [].
 
 handle_consumed_value(Consumed, State) ->
     #state{ stream_id = StreamId,

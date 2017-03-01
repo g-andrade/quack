@@ -9,7 +9,9 @@
                   lager,
                   hash,
                   %curve25519, % broken on app start
-                  hkdf
+                  hkdf,
+                  hpack,
+                  chatterbox
                  ]},
   {mod, { quack_app, []}},
   {env, []}
