@@ -86,7 +86,7 @@ handle_cast({inbound_frame, #stream_frame{} = Frame}, State) ->
     #stream_frame{ offset = Offset,
                    data_payload = Data } = Frame,
     StateB = insert_into_instream_window(Offset, Data, State),
-    {ConsumedValue, StateC} = consume_instream_window_value(StateB),
+    {StateC, ConsumedValue} = consume_instream_window_value(StateB),
     (is_consumed_value_empty(ConsumedValue, StateC#state.data_packing)
      orelse handle_consumed_value(ConsumedValue, StateC)),
     {noreply, StateC};
@@ -128,7 +128,8 @@ insert_into_instream_window(Offset, Data, State) ->
 consume_instream_window_value(State) ->
     Instream = State#state.instream_window,
     {NewInstream, ConsumedValue} = quic_instream_window:consume(Instream),
-    {ConsumedValue, State#state{ instream_window = NewInstream }}.
+    NewState = State#state{ instream_window = NewInstream },
+    {NewState, ConsumedValue}.
 
 -spec is_consumed_value_empty(iodata() | data_kv(), quic_stream_handler:data_packing())
         -> boolean().

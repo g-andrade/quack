@@ -164,7 +164,6 @@ instream_pid(StreamId, State) ->
             {ok, NewInstreamPid} =
                 quic_instreams_sup:start_instream(
                   State#state.instreams_supervisor_pid,
-                  State#state.outflow_pid,
                   StreamId,
                   State#state.default_stream_handler,
                   State#state.default_stream_handler_pid),

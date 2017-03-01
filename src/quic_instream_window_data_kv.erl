@@ -58,8 +58,8 @@ insert_cb(#data_kv_instream_window{ data_instream_window = DataInstream } = Data
 -spec consume_cb(DataKvInstream :: value()) 
         -> {NewDataKvInstream :: value(), DataKvs :: [quic_data_kv:data_kv()]}.
 consume_cb(#data_kv_instream_window{ data_instream_window = DataInstream } = DataKvInstream) ->
-    {NewDataInstream, {DataSize, Data}} = quic_instream_window:consume(DataInstream),
-    case DataSize > 0 of
+    {NewDataInstream, Data} = quic_instream_window:consume(DataInstream),
+    case iolist_size(Data) > 0 of
         false -> {DataKvInstream#data_kv_instream_window{ data_instream_window = NewDataInstream }, []};
         true ->
             UndecodedBuffer = DataKvInstream#data_kv_instream_window.undecoded_buffer,

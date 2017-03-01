@@ -78,13 +78,11 @@ insert_cb(Window, ChunkOffset, Chunk) ->
     ChunkSize = iolist_size(Chunk),
     insert(Window, ChunkOffset, ChunkSize, Chunk, right).
 
--spec consume_cb(Window :: value()) -> {NewWindow :: value(),
-                                        {DataSize :: non_neg_integer(),
-                                         Data :: iodata()}}.
+-spec consume_cb(Window :: value()) -> {NewWindow :: value(), Data :: iodata()}.
 consume_cb(Window) ->
     {NewWindow, DataSize, Data} = consume_without_expansion(Window),
     ExpandedWindow = expand(NewWindow, DataSize),
-    {ExpandedWindow, {DataSize, Data}}.
+    {ExpandedWindow, Data}.
 
 %% ------------------------------------------------------------------
 %% Contiguous
